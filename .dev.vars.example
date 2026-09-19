@@ -85,3 +85,12 @@ ATTACHMENT_MAX_COUNT=10
 # Inbound webhooks / forward (#11). Default: https only; validateSafeUrl on
 # save, fetch, and each redirect. Set to 1 for local http://127.0.0.1 hooks.
 # ALLOW_PRIVATE_WEBHOOKS=0
+#
+# Dev inbox API (/api/v1/dev/inboxes). Own domain only — not a public
+# temp-mail pool. Tokens mint short-lived addresses on their mailbox domain
+# (or MAIL_DOMAIN when set). +tag aliases are a separate surface.
+# MAIL_DOMAIN=example.test
+# DEV_INBOX_QUOTA=8
+# DEV_INBOX_TTL_SECONDS=900
+# DEV_INBOX_TTL_MAX_SECONDS=3600
+# DEV_WAIT_MAX_MS=20000

@@ -44,6 +44,7 @@ import {
   type MailboxRecord,
   type MessageRecord,
 } from "./store.ts";
+import { handleDevInboxRoutes } from "./dev-inbox.ts";
 import { turnstileConfigured, verifyTurnstile } from "./turnstile.ts";
 
 export const DEFAULT_REST_BODY_MAX_BYTES = 256_000;
@@ -116,7 +117,7 @@ async function handleV1(request: Request, env: Env, url: URL): Promise<Response>
       ok: true,
       service: "postgrove",
       api: "v1",
-      hint: "Send Authorization: Bearer pg_… for mailbox-scoped REST. See README (Open REST API).",
+      hint: "Send Authorization: Bearer pg_… for mailbox-scoped REST, including POST /api/v1/dev/inboxes. See README (Open REST API / Dev inbox API).",
     });
   }
 
@@ -136,6 +137,10 @@ async function handleV1(request: Request, env: Env, url: URL): Promise<Response>
   }
 
   const principal = gate.principal;
+
+  if (path === "/api/v1/dev/inboxes" || path.startsWith("/api/v1/dev/inboxes/")) {
+    return handleDevInboxRoutes(request, env, url, principal);
+  }
 
   if (path === "/api/v1/mailboxes") {
     if (method === "GET") {

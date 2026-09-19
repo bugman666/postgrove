@@ -8,6 +8,7 @@ const REQUIRED_TABLES = [
   "users",
   "inbound_hooks",
   "inbound_deliveries",
+  "dev_inboxes",
 ] as const;
 
 export async function handleHealth(env: Env): Promise<Response> {
@@ -19,7 +20,7 @@ export async function handleHealth(env: Env): Promise<Response> {
   try {
     const rows = await env.DB.prepare(
       `SELECT name FROM sqlite_master
-       WHERE type = 'table' AND name IN ('mailboxes', 'messages', 'outbound_attempts', 'api_tokens', 'users', 'inbound_hooks', 'inbound_deliveries')`,
+       WHERE type = 'table' AND name IN ('mailboxes', 'messages', 'outbound_attempts', 'api_tokens', 'users', 'inbound_hooks', 'inbound_deliveries', 'dev_inboxes')`,
     ).all<{ name: string }>();
 
     const present = new Set((rows.results ?? []).map((row) => row.name));

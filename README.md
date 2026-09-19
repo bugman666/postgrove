@@ -57,7 +57,7 @@ See Issues under milestones `P0-MVP` … `P3-dev-api`. Longer write-ups: [produc
 
 ## Status
 
-P0 inbox on the Worker: list / read / delete against D1, inbound attachments in R2, plus compose/send behind the owner session. Search (LIKE on from / subject / body), unread toggle with a nav count, and star/flag are in. System folders (inbox / sent / drafts / trash / spam) use the existing `messages.folder` column; drafts save and resume on `/compose`. Outbound is pluggable (`stub` / `resend` / `http`). Reply / reply-all / forward prefill compose and send through the same adapters (In-Reply-To / References on reply). The inbox list groups related mail into basic threads (count on the row; open expands in time order). Mailbox-scoped REST tokens live under `/api/v1` (hash at rest, `Authorization: Bearer pg_…`). Public signup is **off** unless Turnstile is configured. Small-team members (`users` + `user_mailboxes`) have address / storage / daily-send quotas; `/admin` is a forest-token 值守台 (ADMIN_TOKEN or admin role) with a light overview (users / today's mail / attachment MB) and site title / logo / accent (`--pg-color-brand` only). The UI follows `Accept-Language` (en / zh) and can be forced from Settings. Inbound webhooks POST a signed JSON payload; optional forward goes to a chat-bot URL or an external mailbox. Delivery failures stay on `/settings` and `/admin` (never swallowed). Outbound send attachments are a later follow-up. Light-editorial brand art (paper + forest green) lives in [`docs/assets/`](docs/assets/).
+P0 inbox on the Worker: list / read / delete against D1, inbound attachments in R2, plus compose/send behind the owner session. Search (LIKE on from / subject / body), unread toggle with a nav count, and star/flag are in. System folders (inbox / sent / drafts / trash / spam) use the existing `messages.folder` column; drafts save and resume on `/compose`. Outbound is pluggable (`stub` / `resend` / `http`). Reply / reply-all / forward prefill compose and send through the same adapters (In-Reply-To / References on reply). The inbox list groups related mail into basic threads (count on the row; open expands in time order). Mailbox-scoped REST tokens live under `/api/v1` (hash at rest, `Authorization: Bearer pg_…`). Developer ephemeral inboxes (`/api/v1/dev/inboxes`) mint a short-lived address on **this deployment's own domain**, then wait / extract OTP or link / close. Public signup is **off** unless Turnstile is configured. Small-team members (`users` + `user_mailboxes`) have address / storage / daily-send quotas; `/admin` is a forest-token 值守台 (ADMIN_TOKEN or admin role) with a light overview (users / today's mail / attachment MB) and site title / logo / accent (`--pg-color-brand` only). The UI follows `Accept-Language` (en / zh) and can be forced from Settings. Inbound webhooks POST a signed JSON payload; optional forward goes to a chat-bot URL or an external mailbox. Delivery failures stay on `/settings` and `/admin` (never swallowed). Outbound send attachments are a later follow-up. Light-editorial brand art (paper + forest green) lives in [`docs/assets/`](docs/assets/).
 
 ## Local development
 
@@ -234,7 +234,7 @@ curl -sS http://127.0.0.1:8787/healthz
 
 Expect JSON with `"ok": true` and `"db": "ready"` after migrations. A `503` with `"migrations_pending"` means the local D1 schema has not been applied.
 
-`GET /healthz` stays public (no session). After this milestone it also expects `outbound_attempts`, `api_tokens`, `users`, `inbound_hooks`, and `inbound_deliveries` (`npm run db:migrate:local`). The Email Routing handler is also unauthenticated — Cloudflare calls it, not a browser.
+`GET /healthz` stays public (no session). After this milestone it also expects `outbound_attempts`, `api_tokens`, `users`, `inbound_hooks`, `inbound_deliveries`, and `dev_inboxes` (`npm run db:migrate:local`). The Email Routing handler is also unauthenticated — Cloudflare calls it, not a browser.
 
 ### Compose and outbound
 
@@ -491,7 +491,58 @@ curl -sS -o /dev/stderr -w '%{http_code}\n' \
 
 Override REST knobs with `REST_RATE_LIMIT_MAX`, `REST_RATE_LIMIT_WINDOW_MS`, `SIGNUP_RATE_LIMIT_MAX`, `SIGNUP_RATE_LIMIT_WINDOW_MS`, `REST_BODY_MAX_BYTES` in `.dev.vars` / Worker vars. A new isolate starts a fresh window.
 
-P3 wait-for-code / long-poll is out of scope.
+### Dev inbox API (own domain only)
+
+Short-lived addresses for automated waits (CI, OTP, magic links) on **the domain you already host**. This is not a public temp-mail pool and does not talk to third-party disposable providers.
+
+A mailbox-scoped `pg_…` token (or the admin bearer) can create an ephemeral inbox. That is separate from `POST /api/v1/mailboxes`, which stays **403** for tokens (permanent addresses remain admin/owner). The new address uses the token's mailbox domain — or `MAIL_DOMAIN` when set. Foreign domains are rejected (`own_domain_only`). Generated local parts look like `dev-<12 hex>@your.domain` and **do not** use `+tag` (aliases are a later surface).
+
+```bash
+export PG_TOKEN='pg_…'
+
+# TC14.1 create — usable address on your domain
+curl -sS -H "Authorization: Bearer $PG_TOKEN" \
+  -X POST http://127.0.0.1:8787/api/v1/dev/inboxes \
+  -H 'content-type: application/json' \
+  -d '{"ttl_seconds":900}'
+# → 201 { inbox: { id, address, status, expires_at, mailbox_id } }
+
+# TC14.2 wait / long-poll until a match (timeout_ms default 8000, max 20000)
+curl -sS -H "Authorization: Bearer $PG_TOKEN" \
+  -X POST "http://127.0.0.1:8787/api/v1/dev/inboxes/$INBOX_ID/wait" \
+  -H 'content-type: application/json' \
+  -d '{"timeout_ms":8000,"contains":"482193"}'
+# match → 200 { message }; no match → 408 wait_timeout 「等待超时：时限内未收到匹配邮件。」
+
+# GET is the same: /wait?timeout_ms=8000&subject=&from=&contains=&since=
+
+# TC14.3 extract OTP or link (fail loud)
+curl -sS -H "Authorization: Bearer $PG_TOKEN" \
+  -X POST "http://127.0.0.1:8787/api/v1/dev/inboxes/$INBOX_ID/extract" \
+  -H 'content-type: application/json' \
+  -d '{"kind":"otp"}'
+# or {"kind":"link"} / {"kind":"otp","pattern":"token=([A-Z0-9-]+)","message_id":"…"}
+
+# TC14.4 close (idempotent). Repeat close → 200 already_closed
+curl -sS -H "Authorization: Bearer $PG_TOKEN" \
+  -X POST "http://127.0.0.1:8787/api/v1/dev/inboxes/$INBOX_ID/close"
+```
+
+Missing or invalid bearer → **401**. Using another mailbox's token on someone else's inbox → **403** 「无权限：不能操作其他租户的开发收件箱。」. Too many open inboxes → **409** `quota_dev_inboxes` 「配额已满：…」. Closed / expired wait → **409**. Apply `0012_dev_inboxes.sql`.
+
+**Wait.** Polls D1 until a message matches `since` (epoch ms, exclusive), `subject`, `from`, or `contains` (case-insensitive, subject + snippet + body). Default `timeout_ms` is 8000; hard cap `DEV_WAIT_MAX_MS` (default 20000) so the Worker never hangs. `timeout_ms=0` is a single check. Optional `extract` (`otp` / `link`) runs the helper after a match (422 if extract fails).
+
+**Extract rules** (documented; no guessing):
+
+| kind | Rule order | Fail loud |
+|------|------------|-----------|
+| `otp` | 1. Labeled `验证码` / `code` / `OTP` / `verification code` + 4–8 alphanumeric. 2. Else a single standalone 4–8 digit run (years `19xx`/`20xx` ignored). | No match → `extract_failed`. Several different values → `extract_ambiguous`. |
+| `link` | 1. Labeled verify/confirm/点击/验证 + `https://`. 2. Else first `https://` in the text. Optional `host` filter. | No https → `extract_failed` (plain `http://` is not accepted). |
+| either | `pattern` — JS regex, first capture or full match, max 200 chars. | Invalid regex → `invalid_pattern`. |
+
+**Close / expire.** `POST …/close` disables the mailbox (inbound `setReject`) and sets status `closed`. Calling close again returns `already_closed: true`. TTL default 15 minutes (`DEV_INBOX_TTL_SECONDS`), max 60 minutes. Lazy expire on read/wait/inbound sets `expired` and disables the address.
+
+**Knobs.** `MAIL_DOMAIN`, `DEV_INBOX_QUOTA` (default 8 open per token mailbox; `0` = unlimited), `DEV_INBOX_TTL_SECONDS`, `DEV_INBOX_TTL_MAX_SECONDS`, `DEV_WAIT_MAX_MS`.
 
 ### Inbound stub (local Email Routing)
 
@@ -550,7 +601,9 @@ Then, in the Cloudflare dashboard, enable Email Routing for your domain and add 
 |------|------|
 | `src/index.ts` | Worker `fetch` + `email` handlers |
 | `src/auth.ts` | Owner session + member session + admin bearer/cookie; `requireOwner` / `requireAdmin` |
-| `src/rest.ts` | Token REST `/api/v1` + public signup + admin mint |
+| `src/rest.ts` | Token REST `/api/v1` + public signup + admin mint + `/api/v1/dev/inboxes` |
+| `src/dev-inbox.ts` | Ephemeral own-domain inbox create / wait / close |
+| `src/extract.ts` | OTP / link extract helpers (documented rules, fail loud) |
 | `src/api-tokens.ts` | Opaque `pg_…` tokens (hash at rest, mailbox-scoped) |
 | `src/turnstile.ts` | Cloudflare siteverify (public signup only when configured) |
 | `src/rate-limit.ts` | In-memory limiter for token API + signup |
@@ -585,6 +638,8 @@ Then, in the Cloudflare dashboard, enable Email Routing for your domain and add 
 | `migrations/0008_api_tokens.sql` | Mailbox-scoped API tokens (hash at rest) |
 | `migrations/0009_users_rbac_quotas.sql` | `users`, `user_mailboxes`, `send_usage` |
 | `migrations/0010_inbound_hooks.sql` | `inbound_hooks` + `inbound_deliveries` |
+| `migrations/0011_site_settings.sql` | Light site title / logo / accent |
+| `migrations/0012_dev_inboxes.sql` | Ephemeral developer inboxes (own domain; not +tag aliases) |
 | `scripts/seed-local.sql` | Local sample mailboxes + messages (not for remote) |
 | `scripts/seed-grove-note.txt` | Local sample attachment bytes |
 | `wrangler.jsonc` | Worker + D1 + R2 bindings (placeholders) |

@@ -3,6 +3,7 @@ import { inboundAttachmentRejection } from "./attachment-limits.ts";
 import { persistInboundAttachments } from "./attachments.ts";
 import { extractAttachments, extractBodies } from "./mime.ts";
 import { inboundStorageRejection } from "./quotas.ts";
+import { rejectClosedDevInbox } from "./dev-inbox.ts";
 import { notifyInbound } from "./webhooks.ts";
 
 export async function handleInbound(message: InboundEmail, env: Env): Promise<void> {
@@ -29,6 +30,17 @@ export async function handleInbound(message: InboundEmail, env: Env): Promise<vo
     console.log("inbound stub: mailbox disabled", { to: parsedTo.address });
     message.setReject("mailbox disabled");
     return;
+  }
+  try {
+    const closed = await rejectClosedDevInbox(env, mailbox.id);
+    if (closed) {
+      console.log("inbound stub: dev inbox closed", { to: parsedTo.address, reason: closed });
+      message.setReject(closed);
+      return;
+    }
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "unknown";
+    console.log("inbound stub: dev inbox lookup skipped", { detail });
   }
 
   const now = Date.now();
