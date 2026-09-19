@@ -45,7 +45,18 @@ export function redirect(location: string, status = 303): Response {
 }
 
 export function notFoundJson(): Response {
-  return json({ ok: false, error: "not_found" }, 404);
+  return json({ ok: false, error: "not_found", hint: "Unknown mailbox or message." }, 404);
+}
+
+export function forbiddenJson(): Response {
+  return json(
+    {
+      ok: false,
+      error: "forbidden",
+      hint: "This session is bound to another mailbox. POST /auth/login with that address.",
+    },
+    403,
+  );
 }
 
 export function methodNotAllowed(allow: string): Response {

@@ -468,6 +468,26 @@ input:focus-visible {
   color: var(--pg-color-text-secondary);
 }
 
+.login-form,
+.logout-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--pg-space-3);
+  margin-top: var(--pg-space-4);
+}
+
+.login-form label {
+  display: flex;
+  flex-direction: column;
+  gap: var(--pg-space-1);
+  font-size: var(--pg-text-sm);
+  color: var(--pg-color-text-secondary);
+}
+
+.logout-form {
+  align-items: flex-start;
+}
+
 @media (max-width: 959px) {
   .shell,
   .shell.simple {

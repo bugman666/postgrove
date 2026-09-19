@@ -1,11 +1,11 @@
 import type { Env } from "./env";
-import { json, methodNotAllowed, notFoundJson } from "./http";
+import { requireOwner, type OwnerPrincipal } from "./auth";
+import { forbiddenJson, json, methodNotAllowed, notFoundJson } from "./http";
 import {
   getInboxMessage,
   getMailbox,
   getMessageById,
   listInboxMessages,
-  listMailboxes,
   markRead,
   trashMessage,
   type MailboxRecord,
@@ -17,15 +17,24 @@ export async function handleApi(
   env: Env,
   url: URL,
 ): Promise<Response> {
+  const gate = await requireOwner(request, env);
+  if (!gate.ok) {
+    return gate.response;
+  }
+
   const path = url.pathname;
   const method = request.method;
+  const owner = gate.principal;
 
   if (path === "/api/mailboxes") {
     if (method !== "GET") {
       return methodNotAllowed("GET");
     }
-    const mailboxes = await listMailboxes(env);
-    return json({ ok: true, mailboxes: mailboxes.map(publicMailbox) });
+    const mailbox = await getMailbox(env, owner.mailboxId);
+    if (!mailbox) {
+      return notFoundJson();
+    }
+    return json({ ok: true, mailboxes: [publicMailbox(mailbox)] });
   }
 
   const mailboxMessages = path.match(/^\/api\/mailboxes\/([^/]+)\/messages$/);
@@ -36,6 +45,9 @@ export async function handleApi(
     const mailbox = await getMailbox(env, decodeURIComponent(mailboxMessages[1]));
     if (!mailbox) {
       return notFoundJson();
+    }
+    if (!sameMailbox(owner, mailbox)) {
+      return forbiddenJson();
     }
     const messages = await listInboxMessages(env, mailbox.id);
     return json({
@@ -50,10 +62,10 @@ export async function handleApi(
   if (oneMessage) {
     const messageId = decodeURIComponent(oneMessage[1]);
     if (method === "GET") {
-      return readMessage(env, messageId);
+      return readMessage(env, owner, messageId);
     }
     if (method === "DELETE") {
-      return deleteMessage(env, messageId);
+      return deleteMessage(env, owner, messageId);
     }
     return methodNotAllowed("GET, DELETE");
   }
@@ -61,10 +73,17 @@ export async function handleApi(
   return notFoundJson();
 }
 
-async function readMessage(env: Env, messageId: string): Promise<Response> {
+async function readMessage(
+  env: Env,
+  owner: OwnerPrincipal,
+  messageId: string,
+): Promise<Response> {
   const existing = await getMessageById(env, messageId);
   if (!existing) {
     return notFoundJson();
+  }
+  if (existing.mailbox_id !== owner.mailboxId) {
+    return forbiddenJson();
   }
   if (existing.is_read !== 1) {
     await markRead(env, existing.mailbox_id, existing.id);
@@ -76,16 +95,27 @@ async function readMessage(env: Env, messageId: string): Promise<Response> {
   return json({ ok: true, message: publicMessageDetail(message) });
 }
 
-async function deleteMessage(env: Env, messageId: string): Promise<Response> {
+async function deleteMessage(
+  env: Env,
+  owner: OwnerPrincipal,
+  messageId: string,
+): Promise<Response> {
   const existing = await getMessageById(env, messageId);
   if (!existing) {
     return notFoundJson();
+  }
+  if (existing.mailbox_id !== owner.mailboxId) {
+    return forbiddenJson();
   }
   const moved = await trashMessage(env, existing.mailbox_id, existing.id);
   if (!moved) {
     return notFoundJson();
   }
   return json({ ok: true, id: existing.id, folder: "trash" });
+}
+
+function sameMailbox(owner: OwnerPrincipal, mailbox: MailboxRecord): boolean {
+  return mailbox.id === owner.mailboxId || mailbox.address === owner.address;
 }
 
 function publicMailbox(row: MailboxRecord) {

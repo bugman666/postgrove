@@ -1,12 +1,11 @@
 import type { Env } from "./env";
+import { requireOwner, type OwnerPrincipal } from "./auth";
 import { html, redirect } from "./http";
 import { EMPTY_ART, GROVE_MARK, escapeHtml, formatReceived } from "./html";
 import {
-  defaultMailbox,
   getInboxMessage,
   getMailbox,
   listInboxMessages,
-  listMailboxes,
   markRead,
   trashMessage,
   type MailboxRecord,
@@ -20,27 +19,31 @@ export async function handleUi(
   env: Env,
   url: URL,
 ): Promise<Response> {
+  const gate = await requireOwner(request, env);
+  if (!gate.ok) {
+    return unauthorizedPage(gate.response);
+  }
+
+  const owner = gate.principal;
   const path = url.pathname;
   const method = request.method;
+  const ownMailbox = await getMailbox(env, owner.mailboxId);
 
   if (path === "/") {
     if (method !== "GET") {
       return pageMethodNotAllowed();
     }
-    const wanted = url.searchParams.get("mailbox");
-    const mailbox = wanted ? await getMailbox(env, wanted) : await defaultMailbox(env);
-    if (!mailbox) {
+    if (!ownMailbox) {
       return html(renderAddressesPage([], "inbox"), 200);
     }
-    return redirect(boxPath(mailbox.id));
+    return redirect(boxPath(ownMailbox.id));
   }
 
   if (path === "/compose") {
     if (method !== "GET") {
       return pageMethodNotAllowed();
     }
-    const mailbox = await mailboxFromQuery(env, url);
-    return html(renderStubPage("compose", "写信", mailbox, [
+    return html(renderStubPage("compose", "写信", ownMailbox, [
       "写信尚未接通。出站发送在后续交付。",
       "你现在可以读和删除已收到的信。",
     ]));
@@ -50,19 +53,17 @@ export async function handleUi(
     if (method !== "GET") {
       return pageMethodNotAllowed();
     }
-    const mailboxes = await listMailboxes(env);
-    return html(renderAddressesPage(mailboxes, "addresses"));
+    return html(renderAddressesPage(ownMailbox ? [ownMailbox] : [], "addresses"));
   }
 
   if (path === "/settings") {
     if (method !== "GET") {
       return pageMethodNotAllowed();
     }
-    const mailbox = await mailboxFromQuery(env, url);
-    return html(renderStubPage("settings", "设置", mailbox, [
-      "登录与权限是后续工作。本地开发可直接打开已种子的邮箱。",
+    return html(renderStubPage("settings", "设置", ownMailbox, [
+      "会话绑在你登录的地址上。登出后需要再次 POST /auth/login。",
       "还没收到信？确认 Email Routing 已指向本 Worker。",
-    ]));
+    ], true));
   }
 
   const deleteMatch = path.match(/^\/box\/([^/]+)\/m\/([^/]+)\/delete$/);
@@ -70,9 +71,9 @@ export async function handleUi(
     if (method !== "POST") {
       return pageMethodNotAllowed();
     }
-    const mailbox = await getMailbox(env, decodeURIComponent(deleteMatch[1]));
+    const mailbox = await allowedMailbox(env, owner, decodeURIComponent(deleteMatch[1]));
     if (!mailbox) {
-      return html(renderNotFound(), 404);
+      return forbiddenOrMissing(ownMailbox);
     }
     const messageId = decodeURIComponent(deleteMatch[2]);
     await trashMessage(env, mailbox.id, messageId);
@@ -84,9 +85,9 @@ export async function handleUi(
     if (method !== "GET") {
       return pageMethodNotAllowed();
     }
-    const mailbox = await getMailbox(env, decodeURIComponent(readMatch[1]));
+    const mailbox = await allowedMailbox(env, owner, decodeURIComponent(readMatch[1]));
     if (!mailbox) {
-      return html(renderNotFound(), 404);
+      return forbiddenOrMissing(ownMailbox);
     }
     const messageId = decodeURIComponent(readMatch[2]);
     const existing = await getInboxMessage(env, mailbox.id, messageId);
@@ -107,9 +108,9 @@ export async function handleUi(
     if (method !== "GET") {
       return pageMethodNotAllowed();
     }
-    const mailbox = await getMailbox(env, decodeURIComponent(boxMatch[1]));
+    const mailbox = await allowedMailbox(env, owner, decodeURIComponent(boxMatch[1]));
     if (!mailbox) {
-      return html(renderNotFound(), 404);
+      return forbiddenOrMissing(ownMailbox);
     }
     const messages = await listInboxMessages(env, mailbox.id);
     return html(
@@ -122,12 +123,43 @@ export async function handleUi(
   return html(renderNotFound(), 404);
 }
 
-async function mailboxFromQuery(env: Env, url: URL): Promise<MailboxRecord | null> {
-  const wanted = url.searchParams.get("mailbox");
-  if (wanted) {
-    return getMailbox(env, wanted);
+async function allowedMailbox(
+  env: Env,
+  owner: OwnerPrincipal,
+  idOrAddress: string,
+): Promise<MailboxRecord | null> {
+  const mailbox = await getMailbox(env, idOrAddress);
+  if (!mailbox) {
+    return null;
   }
-  return defaultMailbox(env);
+  if (mailbox.id !== owner.mailboxId && mailbox.address !== owner.address) {
+    return null;
+  }
+  return mailbox;
+}
+
+async function unauthorizedPage(authResponse: Response): Promise<Response> {
+  let hint = "POST /auth/login with address and token, then send the session cookie.";
+  let error = "unauthorized";
+  try {
+    const body = (await authResponse.clone().json()) as {
+      hint?: string;
+      error?: string;
+    };
+    if (typeof body.hint === "string" && body.hint) {
+      hint = body.hint;
+    }
+    if (typeof body.error === "string" && body.error) {
+      error = body.error;
+    }
+  } catch {
+    // Keep the auth-module default hint.
+  }
+  return html(renderLoginPage(error, hint), authResponse.status);
+}
+
+function forbiddenOrMissing(ownMailbox: MailboxRecord | null): Response {
+  return html(renderForbidden(ownMailbox), ownMailbox ? 403 : 404);
 }
 
 function pageMethodNotAllowed(): Response {
@@ -289,8 +321,26 @@ function renderStubPage(
   heading: string,
   mailbox: MailboxRecord | null,
   notes: string[],
+  showLogout = false,
 ): string {
   const banners = notes.map((note) => `<p class="banner">${escapeHtml(note)}</p>`).join("");
+  const logout = showLogout
+    ? `<form id="logout-form" class="logout-form">
+        <button class="btn" type="submit">登出</button>
+      </form>
+      <script>
+        (function () {
+          var form = document.getElementById("logout-form");
+          if (!form) return;
+          form.addEventListener("submit", function (event) {
+            event.preventDefault();
+            fetch("/auth/logout", { method: "POST" }).finally(function () {
+              location.href = "/";
+            });
+          });
+        })();
+      </script>`
+    : "";
   return layout({
     title: `${heading} · Postgrove`,
     nav,
@@ -299,7 +349,90 @@ function renderStubPage(
     simple: true,
     body: `<main class="page"><div class="page-inner">
       <div class="page-head"><h1>${escapeHtml(heading)}</h1></div>
-      <div class="page-card">${banners}</div>
+      <div class="page-card">${banners}${logout}</div>
+    </div></main>`,
+  });
+}
+
+function renderLoginPage(error: string, hint: string): string {
+  return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>登录 · Postgrove</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body class="mode-list">
+  <main class="page">
+    <div class="page-inner">
+      <a class="brand" href="/">${GROVE_MARK}Postgrove</a>
+      <div class="page-head"><h1>登录</h1></div>
+      <div class="page-card">
+        <p class="banner">登录已失效。重新登录后再继续。</p>
+        <p class="banner"><code class="mono">${escapeHtml(error)}</code> — ${escapeHtml(hint)}</p>
+        <form id="login-form" class="login-form">
+          <label>地址
+            <input name="address" class="search" type="email" autocomplete="username" value="inbox@example.test" required>
+          </label>
+          <label>口令
+            <input name="token" class="search" type="password" autocomplete="current-password" required>
+          </label>
+          <button class="btn btn-primary" type="submit">登录</button>
+          <p id="login-error" class="banner" hidden></p>
+        </form>
+      </div>
+    </div>
+  </main>
+  <script>
+    (function () {
+      var form = document.getElementById("login-form");
+      var err = document.getElementById("login-error");
+      if (!form || !err) return;
+      form.addEventListener("submit", function (event) {
+        event.preventDefault();
+        var data = new FormData(form);
+        err.hidden = true;
+        fetch("/auth/login", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            address: data.get("address"),
+            token: data.get("token")
+          })
+        }).then(function (res) { return res.json().then(function (body) { return { res: res, body: body }; }); })
+          .then(function (result) {
+            if (result.res.ok) {
+              location.href = "/";
+              return;
+            }
+            err.textContent = result.body.hint || result.body.error || "登录失败。";
+            err.hidden = false;
+          })
+          .catch(function () {
+            err.textContent = "登录失败。检查网络后重试。";
+            err.hidden = false;
+          });
+      });
+    })();
+  </script>
+</body>
+</html>`;
+}
+
+function renderForbidden(mailbox: MailboxRecord | null): string {
+  return layout({
+    title: "无权查看 · Postgrove",
+    nav: "inbox",
+    mailbox,
+    mode: "list",
+    simple: true,
+    body: `<main class="page"><div class="page-inner">
+      <div class="page-card">
+        <h1>无权查看这个地址</h1>
+        <p class="banner">This session is bound to another mailbox. POST /auth/login with that address.</p>
+        <p><a href="${escapeHtml(inboxHref(mailbox))}">返回收件箱</a></p>
+      </div>
     </div></main>`,
   });
 }

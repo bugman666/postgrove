@@ -73,7 +73,9 @@ npm run dev
 
 ### Inbox (local)
 
-Inbox HTML and `/api/mailboxes` / `/api/messages` require an owner session. `/healthz` and inbound Email Routing stay public. Log in first (see Auth below), then open [http://127.0.0.1:8787/](http://127.0.0.1:8787/). The session is bound to the address you signed in as.
+Inbox HTML (`/`, `/box/:id`, read/delete) and `/api/mailboxes` / `/api/messages` call `requireOwner`. Without a session they return **401** (`unauthorized` plus the same hint as `src/auth.ts`). `/healthz` and inbound Email Routing stay public. `/app.css` stays public so the login page can load.
+
+Browser: open [http://127.0.0.1:8787/](http://127.0.0.1:8787/), sign in with a seeded address and `OWNER_TOKEN` (`change-me-local-owner-token` from `.dev.vars.example`). The session is bound to that address.
 
 Seeded addresses:
 
@@ -112,7 +114,7 @@ Expect JSON with `"ok": true` and `"db": "ready"` after migrations. A `503` with
 
 ### Auth (mailbox owner session + admin bearer)
 
-Design: **owner = signed HttpOnly session cookie** after `POST /auth/login`. **Admin = `Authorization: Bearer <ADMIN_TOKEN>`**. One shared `OWNER_TOKEN` proves mailbox ownership; the session is bound to the address you logged in as. Inbox code should call `requireOwner` / `requireAdmin` from `src/auth.ts`.
+Design: **owner = signed HttpOnly session cookie** after `POST /auth/login`. **Admin = `Authorization: Bearer <ADMIN_TOKEN>`**. One shared `OWNER_TOKEN` proves mailbox ownership; the session is bound to the address you logged in as. Inbox HTML and JSON call `requireOwner` from `src/auth.ts`.
 
 Copy `.dev.vars.example` to `.dev.vars` (gitignored). The example values work locally; change them before any remote deploy and set the same names with `npx wrangler secret put`.
 
