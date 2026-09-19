@@ -9,7 +9,8 @@
 #   curl -H 'Authorization: Bearer change-me-local-admin-token' \
 #     http://127.0.0.1:8787/admin/ping
 #
-# Production: `npx wrangler secret put SESSION_SECRET` (and OWNER_TOKEN, ADMIN_TOKEN).
+# Production: `npx wrangler secret put SESSION_SECRET` (and OWNER_TOKEN, ADMIN_TOKEN,
+# plus RESEND_API_KEY when OUTBOUND_PROVIDER=resend).
 # Do not reuse these placeholders remotely.
 #
 # OWNER_TOKEN is one shared secret for every mailbox — not a per-address password.
@@ -32,5 +33,20 @@ OWNER_TOKEN=change-me-local-owner-token
 # Admin bearer token for /admin/* (Authorization: Bearer …, min 8 characters).
 ADMIN_TOKEN=change-me-local-admin-token
 
-# Reserved for a later outbound send provider. Unused in this scaffold.
-# SEND_PROVIDER_KEY=
+# Outbound send. stub records attempts in D1 and does not leave the box.
+# resend needs RESEND_API_KEY. http needs OUTBOUND_HTTP_URL.
+# Unset / incomplete real providers fail loud on send (no silent drop).
+OUTBOUND_PROVIDER=stub
+
+# Required when OUTBOUND_PROVIDER=resend.
+# RESEND_API_KEY=
+# Optional From override (must be a domain verified in Resend).
+# RESEND_FROM=
+
+# Alternative: OUTBOUND_PROVIDER=http
+# POST JSON { from, to, subject, text } to this URL.
+# OUTBOUND_HTTP_URL=
+# OUTBOUND_HTTP_TOKEN=
+
+# Optional From override for any provider (wins over RESEND_FROM).
+# OUTBOUND_FROM=

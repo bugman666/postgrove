@@ -2,17 +2,28 @@ import type { Env } from "./env";
 import { requireOwner, type OwnerPrincipal } from "./auth";
 import { html, redirect } from "./http";
 import { EMPTY_ART, GROVE_MARK, escapeHtml, formatReceived } from "./html";
+import { describeOutbound } from "./outbound";
+import { parseSendFields, sendOutbound } from "./send";
 import {
   getInboxMessage,
   getMailbox,
+  getOutboundAttempt,
   listInboxMessages,
+  listOutboundAttempts,
   markRead,
   trashMessage,
   type MailboxRecord,
   type MessageRecord,
+  type OutboundAttemptRecord,
 } from "./store";
 
 type NavId = "inbox" | "compose" | "addresses" | "settings";
+
+interface ComposeForm {
+  to: string;
+  subject: string;
+  body: string;
+}
 
 export async function handleUi(
   request: Request,
@@ -40,13 +51,13 @@ export async function handleUi(
   }
 
   if (path === "/compose") {
+    if (method === "POST") {
+      return handleComposeSubmit(request, env, url, owner, ownMailbox);
+    }
     if (method !== "GET") {
       return pageMethodNotAllowed();
     }
-    return html(renderStubPage("compose", "写信", ownMailbox, [
-      "写信尚未接通。出站发送在后续交付。",
-      "你现在可以读和删除已收到的信。",
-    ]));
+    return renderCompose(env, url, ownMailbox);
   }
 
   if (path === "/addresses") {
@@ -63,6 +74,7 @@ export async function handleUi(
     return html(renderStubPage("settings", "设置", ownMailbox, [
       "会话绑在你登录的地址上。登出后需要再次 POST /auth/login。",
       "还没收到信？确认 Email Routing 已指向本 Worker。",
+      describeOutbound(env).hint,
     ], true));
   }
 
@@ -160,6 +172,103 @@ async function unauthorizedPage(authResponse: Response): Promise<Response> {
 
 function forbiddenOrMissing(ownMailbox: MailboxRecord | null): Response {
   return html(renderForbidden(ownMailbox), ownMailbox ? 403 : 404);
+}
+
+async function handleComposeSubmit(
+  request: Request,
+  env: Env,
+  url: URL,
+  owner: OwnerPrincipal,
+  ownMailbox: MailboxRecord | null,
+): Promise<Response> {
+  if (!ownMailbox) {
+    return html(
+      renderComposePage(env, ownMailbox, {
+        form: emptyComposeForm(),
+        formError: "没有可用地址。先确认本地已经 migrate 并且 seed，再 POST /auth/login。",
+        attempts: [],
+      }),
+      404,
+    );
+  }
+  if (ownMailbox.id !== owner.mailboxId && ownMailbox.address !== owner.address) {
+    return forbiddenOrMissing(ownMailbox);
+  }
+
+  let form: ComposeForm;
+  const contentType = request.headers.get("content-type") ?? "";
+  if (contentType.includes("application/json")) {
+    let body: unknown;
+    try {
+      body = await request.json();
+    } catch {
+      form = emptyComposeForm();
+      return html(
+        renderComposePage(env, ownMailbox, {
+          form,
+          formError: "Send JSON { \"to\", \"subject\", \"text\" } or a form post.",
+          attempts: await listOutboundAttempts(env, ownMailbox.id),
+        }),
+        400,
+      );
+    }
+    const record = body && typeof body === "object" ? (body as Record<string, unknown>) : {};
+    form = {
+      to: typeof record.to === "string" ? record.to : "",
+      subject: typeof record.subject === "string" ? record.subject : "",
+      body: typeof record.text === "string" ? record.text : typeof record.body === "string" ? record.body : "",
+    };
+  } else {
+    const data = await request.formData();
+    form = {
+      to: stringField(data.get("to")),
+      subject: stringField(data.get("subject")),
+      body: stringField(data.get("body")),
+    };
+  }
+
+  const parsed = parseSendFields({ to: form.to, subject: form.subject, text: form.body });
+  if (!parsed.ok) {
+    return html(
+      renderComposePage(env, ownMailbox, {
+        form,
+        formError: parsed.hint,
+        attempts: await listOutboundAttempts(env, ownMailbox.id),
+      }),
+      400,
+    );
+  }
+
+  const outcome = await sendOutbound(env, ownMailbox, parsed.input);
+  const next = new URL(withMailbox("/compose", ownMailbox), url.origin);
+  next.searchParams.set("attempt", outcome.attempt.id);
+  return redirect(`${next.pathname}${next.search}`);
+}
+
+async function renderCompose(
+  env: Env,
+  url: URL,
+  mailbox: MailboxRecord | null,
+): Promise<Response> {
+  const attempts = mailbox ? await listOutboundAttempts(env, mailbox.id) : [];
+  const attemptId = url.searchParams.get("attempt");
+  const highlighted =
+    mailbox && attemptId ? await getOutboundAttempt(env, mailbox.id, attemptId) : null;
+  return html(
+    renderComposePage(env, mailbox, {
+      form: emptyComposeForm(),
+      highlighted,
+      attempts,
+    }),
+  );
+}
+
+function stringField(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
+function emptyComposeForm(): ComposeForm {
+  return { to: "", subject: "", body: "" };
 }
 
 function pageMethodNotAllowed(): Response {
@@ -283,6 +392,123 @@ function renderReading(
       <pre class="body">${body}</pre>
     </article>
   </div>`;
+}
+
+function renderComposePage(
+  env: Env,
+  mailbox: MailboxRecord | null,
+  opts: {
+    form: ComposeForm;
+    formError?: string;
+    highlighted?: OutboundAttemptRecord | null;
+    attempts: OutboundAttemptRecord[];
+  },
+): string {
+  const outbound = describeOutbound(env);
+  const banners: string[] = [];
+  if (opts.highlighted) {
+    banners.push(attemptBanner(opts.highlighted));
+  }
+  if (opts.formError) {
+    banners.push(
+      `<p class="banner danger">${escapeHtml(opts.formError)}</p>`,
+    );
+  }
+  if (!opts.highlighted && outbound.provider === "unset") {
+    banners.push(`<p class="banner danger">${escapeHtml(outbound.hint)}</p>`);
+  } else if (!opts.highlighted && outbound.provider === "stub") {
+    banners.push(`<p class="banner">${escapeHtml(outbound.hint)}</p>`);
+  }
+
+  const fromLine = mailbox
+    ? `<p class="from-line">发件人 <span class="mono">${escapeHtml(mailbox.address)}</span></p>`
+    : `<p class="banner danger">没有可用地址。确认本地已经 migrate 并且 seed。</p>`;
+
+  const disabled = mailbox ? "" : " disabled";
+  const form = `<form id="compose-form" class="compose-form" method="post" action="${escapeHtml(withMailbox("/compose", mailbox))}">
+      ${fromLine}
+      <label>收件人
+        <input class="search compose-input" name="to" type="email" autocomplete="email" required value="${escapeHtml(opts.form.to)}"${disabled}>
+      </label>
+      <label>主题
+        <input class="search compose-input" name="subject" type="text" maxlength="998" value="${escapeHtml(opts.form.subject)}"${disabled}>
+      </label>
+      <label>正文
+        <textarea class="compose-body" name="body" rows="14"${disabled}>${escapeHtml(opts.form.body)}</textarea>
+      </label>
+      <button class="btn btn-primary" type="submit"${disabled}>发送</button>
+    </form>
+    <script>
+      (function () {
+        var form = document.getElementById("compose-form");
+        if (!form) return;
+        form.addEventListener("submit", function () {
+          var btn = form.querySelector("button[type=submit]");
+          if (btn) {
+            btn.disabled = true;
+            btn.textContent = "正在发送…";
+          }
+        });
+      })();
+    </script>`;
+
+  const history = renderAttemptHistory(opts.attempts, opts.highlighted?.id ?? null);
+
+  return layout({
+    title: "写信 · Postgrove",
+    nav: "compose",
+    mailbox,
+    mode: "list",
+    simple: true,
+    body: `<main class="page"><div class="page-inner">
+      <div class="page-head"><h1>写信</h1></div>
+      <div class="page-card">${banners.join("")}${form}${history}</div>
+    </div></main>`,
+  });
+}
+
+function attemptBanner(row: OutboundAttemptRecord): string {
+  if (row.status === "sent") {
+    const extra =
+      row.provider === "stub"
+        ? "已记下这次发送（stub 不真正寄出）。"
+        : "已发出。";
+    return `<p class="banner success">${escapeHtml(extra)}</p>`;
+  }
+  const reason = row.error || "outbound_failed";
+  const next = row.hint || "检查出站配置或稍后重试。";
+  return `<p class="banner danger">没发出去：${escapeHtml(reason)}。${escapeHtml(next)}</p>`;
+}
+
+function renderAttemptHistory(
+  attempts: OutboundAttemptRecord[],
+  highlightedId: string | null,
+): string {
+  if (attempts.length === 0) {
+    return "";
+  }
+  const items = attempts
+    .map((row) => {
+      const selected = row.id === highlightedId ? " selected" : "";
+      const status =
+        row.status === "sent" ? "已发出" : `失败 · ${row.error || "outbound_failed"}`;
+      const subject = row.subject?.trim() ? row.subject : "（无主题）";
+      return `<li class="attempt${selected}">
+        <div class="attempt-top">
+          <span class="attempt-status ${row.status}">${escapeHtml(status)}</span>
+          <time datetime="${escapeHtml(new Date(row.created_at).toISOString())}">${escapeHtml(formatReceived(row.created_at))}</time>
+        </div>
+        <div>收件人 <span class="mono">${escapeHtml(row.to_address)}</span></div>
+        <div>主题 ${escapeHtml(subject)}</div>
+        <div>提供商 <span class="mono">${escapeHtml(row.provider)}</span></div>
+        ${row.hint ? `<p class="attempt-hint">${escapeHtml(row.hint)}</p>` : ""}
+      </li>`;
+    })
+    .join("");
+  return `<section class="attempts">
+    <h2>最近发送</h2>
+    <ul class="attempt-list">${items}</ul>
+  </section>`;
 }
 
 function renderAddressesPage(mailboxes: MailboxRecord[], nav: NavId): string {

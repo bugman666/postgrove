@@ -6,6 +6,18 @@ export interface Env {
   OWNER_TOKEN?: string;
   /** Bearer token for /admin/* (Authorization: Bearer …). */
   ADMIN_TOKEN?: string;
+  /** stub | resend | http. Unset fails loud on send (no silent drop). */
+  OUTBOUND_PROVIDER?: string;
+  /** Required when OUTBOUND_PROVIDER=resend. */
+  RESEND_API_KEY?: string;
+  /** Optional From override for Resend (verified domain). */
+  RESEND_FROM?: string;
+  /** Required when OUTBOUND_PROVIDER=http. POST JSON {from,to,subject,text}. */
+  OUTBOUND_HTTP_URL?: string;
+  /** Optional Bearer token for the HTTP outbound hook. */
+  OUTBOUND_HTTP_TOKEN?: string;
+  /** Optional From override for any provider (wins over RESEND_FROM). */
+  OUTBOUND_FROM?: string;
 }
 
 /** Envelope fields used by the Email Routing stub. */

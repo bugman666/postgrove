@@ -132,3 +132,77 @@ export async function trashMessage(
     .run();
   return (result.meta.changes ?? 0) > 0;
 }
+
+export interface OutboundAttemptRecord {
+  id: string;
+  mailbox_id: string;
+  from_address: string;
+  to_address: string;
+  subject: string | null;
+  body_text: string | null;
+  provider: string;
+  status: "sent" | "failed";
+  error: string | null;
+  hint: string | null;
+  provider_message_id: string | null;
+  created_at: number;
+}
+
+const OUTBOUND_COLUMNS = `id, mailbox_id, from_address, to_address, subject, body_text,
+  provider, status, error, hint, provider_message_id, created_at`;
+
+export async function insertOutboundAttempt(
+  env: Env,
+  row: OutboundAttemptRecord,
+): Promise<void> {
+  await env.DB.prepare(
+    `INSERT INTO outbound_attempts (
+       id, mailbox_id, from_address, to_address, subject, body_text,
+       provider, status, error, hint, provider_message_id, created_at
+     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)`,
+  )
+    .bind(
+      row.id,
+      row.mailbox_id,
+      row.from_address,
+      row.to_address,
+      row.subject,
+      row.body_text,
+      row.provider,
+      row.status,
+      row.error,
+      row.hint,
+      row.provider_message_id,
+      row.created_at,
+    )
+    .run();
+}
+
+export async function getOutboundAttempt(
+  env: Env,
+  mailboxId: string,
+  attemptId: string,
+): Promise<OutboundAttemptRecord | null> {
+  return env.DB.prepare(
+    `SELECT ${OUTBOUND_COLUMNS} FROM outbound_attempts
+     WHERE id = ?1 AND mailbox_id = ?2`,
+  )
+    .bind(attemptId, mailboxId)
+    .first<OutboundAttemptRecord>();
+}
+
+export async function listOutboundAttempts(
+  env: Env,
+  mailboxId: string,
+  limit = 20,
+): Promise<OutboundAttemptRecord[]> {
+  const rows = await env.DB.prepare(
+    `SELECT ${OUTBOUND_COLUMNS} FROM outbound_attempts
+     WHERE mailbox_id = ?1
+     ORDER BY created_at DESC
+     LIMIT ?2`,
+  )
+    .bind(mailboxId, limit)
+    .all<OutboundAttemptRecord>();
+  return rows.results ?? [];
+}
