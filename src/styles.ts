@@ -194,6 +194,73 @@ textarea:focus-visible {
   border-top: 1px solid var(--pg-color-border);
 }
 
+.nav-group {
+  margin: 0 0 var(--pg-space-4);
+}
+
+.nav-group-label,
+.nav-folders > summary {
+  margin: 0 0 var(--pg-space-1);
+  padding: 0 var(--pg-space-3);
+  font-size: var(--pg-text-xs);
+  font-weight: 650;
+  letter-spacing: 0.03em;
+  color: var(--pg-color-text-secondary);
+}
+
+.nav-folders > summary {
+  list-style: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  min-height: 32px;
+}
+
+.nav-folders > summary::-webkit-details-marker {
+  display: none;
+}
+
+.nav-desk {
+  margin: var(--pg-space-3) 0 0;
+  padding: 0 var(--pg-space-3);
+  font-size: var(--pg-text-sm);
+}
+
+.nav-desk a {
+  color: var(--pg-color-text-secondary);
+}
+
+.nav-desk a.active {
+  color: var(--pg-color-brand);
+  font-weight: 600;
+}
+
+.more-bar {
+  display: none;
+}
+
+.more-drawer {
+  margin: 0;
+  padding: var(--pg-space-3) var(--pg-space-4);
+  border-bottom: 1px solid var(--pg-color-border);
+  background: var(--pg-color-surface);
+}
+
+.more-drawer > summary {
+  list-style: none;
+  cursor: pointer;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  font-size: var(--pg-text-sm);
+  font-weight: 650;
+  color: var(--pg-color-text-secondary);
+}
+
+.more-drawer > summary::-webkit-details-marker {
+  display: none;
+}
+
 .folder-strip {
   display: flex;
   flex-wrap: wrap;
@@ -599,6 +666,27 @@ textarea:focus-visible {
   color: var(--pg-color-danger);
 }
 
+.banner-lead {
+  margin: 0;
+}
+
+.banner-details {
+  margin-top: var(--pg-space-2);
+  font-size: var(--pg-text-xs);
+}
+
+.banner-details summary {
+  cursor: pointer;
+}
+
+.banner-details-body {
+  margin-top: var(--pg-space-2);
+}
+
+.banner-details-body p {
+  margin: var(--pg-space-1) 0 0;
+}
+
 .compose-form,
 .login-form,
 .logout-form {
@@ -721,6 +809,15 @@ textarea:focus-visible {
   height: 64px;
   margin: 0 auto var(--pg-space-4);
   color: var(--pg-color-brand);
+}
+
+.empty-photo {
+  display: block;
+  width: min(100%, 280px);
+  height: auto;
+  margin: 0 auto var(--pg-space-4);
+  border-radius: var(--pg-radius-md);
+  object-fit: cover;
 }
 
 .empty p {
@@ -902,7 +999,8 @@ textarea:focus-visible {
 }
 
 @media (min-width: 960px) {
-  .folder-strip {
+  .folder-strip,
+  .more-bar {
     display: none;
   }
 }
@@ -916,6 +1014,10 @@ textarea:focus-visible {
 
   .nav {
     display: none;
+  }
+
+  .more-bar {
+    display: block;
   }
 
   body.mode-read .list {

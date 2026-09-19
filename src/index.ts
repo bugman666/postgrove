@@ -3,6 +3,8 @@ import { handleApi } from "./api";
 import { ATTACHMENT_CSS, handleAttachmentRoutes } from "./attachments";
 import { handleAdmin } from "./admin.ts";
 import { handleAuthRoutes } from "./auth";
+import { isEmptyInboxAssetPath } from "./brand-assets.ts";
+import { serveEmptyInboxAsset } from "./brand-assets-serve.ts";
 import { brandOverrideCss, loadBranding } from "./branding.ts";
 import { handleHealth } from "./health";
 import { css } from "./http";
@@ -24,6 +26,10 @@ export default {
     if (request.method === "GET" && url.pathname === "/app.css") {
       const brand = await loadBranding(env);
       return css(APP_CSS + ATTACHMENT_CSS + brandOverrideCss(brand.accent));
+    }
+
+    if (request.method === "GET" && isEmptyInboxAssetPath(url.pathname)) {
+      return serveEmptyInboxAsset();
     }
 
     const auth = await handleAuthRoutes(request, env);

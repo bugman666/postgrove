@@ -1,6 +1,6 @@
 import type { AttachmentRecord } from "../attachments.ts";
 import { renderAttachmentsHtml } from "../attachments.ts";
-import { FOLDER_LABELS, folderNavLinks, type SystemFolder } from "../folders.ts";
+import { FOLDER_LABELS, type SystemFolder } from "../folders.ts";
 import { escapeHtml, formatReceived } from "../html.ts";
 import { folderEmptyKey, folderLabelKey } from "../i18n.ts";
 import type { MailboxRecord, MessageRecord } from "../store.ts";
@@ -15,13 +15,12 @@ import type { InboxFilter } from "../triage.ts";
 import {
   boxPath,
   composeHref,
-  folderHref,
   messageHref,
   messagePath,
   threadHref,
   viewHref,
 } from "../ui-paths.ts";
-import { emptyBlock, folderLabels, layout, pageTitle, tr, type Shell } from "../view.ts";
+import { emptyBlock, layout, pageTitle, tr, type Shell } from "../view.ts";
 
 export function attachmentsForMessage(
   attachments: AttachmentRecord[],
@@ -61,7 +60,7 @@ export function renderInboxPage(
     ?? (selected ? findThreadForMessage(threads, selected.id) : null);
   const emptyCopy = emptyInboxCopy(shell, messages.length, q, filter);
   const list = messages.length === 0
-    ? emptyBlock(emptyCopy)
+    ? emptyBlock(emptyCopy, inboxEmptyArt(q, filter), inboxEmptyAlt(shell, q, filter))
     : `<ul class="msg-list">${threads.map((thread) => threadRow(mailbox, thread, selectedThread?.id, q, filter)).join("")}</ul>`;
 
   let reading: string;
@@ -117,7 +116,6 @@ export function renderInboxPage(
     body: `<section class="list">
       <div class="list-head">
         <h1>${escapeHtml(heading)}</h1>
-        ${folderStrip(shell, mailbox, "inbox")}
         <form class="search-form" method="get" action="${escapeHtml(boxPath(mailbox.id))}">
           <input class="search" type="search" name="q" value="${escapeHtml(q)}" placeholder="搜索发件人、收件人、主题或正文" maxlength="200">
           ${filter !== "all" ? `<input type="hidden" name="filter" value="${escapeHtml(filter)}">` : ""}
@@ -181,7 +179,6 @@ export function renderFolderPage(
     body: `<section class="list">
       <div class="list-head">
         <h1>${escapeHtml(label)}</h1>
-        ${folderStrip(shell, mailbox, folder)}
       </div>
       ${list}
     </section>
@@ -189,15 +186,21 @@ export function renderFolderPage(
   });
 }
 
-export function folderStrip(shell: Shell, mailbox: MailboxRecord, folder: SystemFolder): string {
-  return `<nav class="folder-strip" aria-label="${escapeHtml(tr(shell, "nav.folders"))}">
-    ${folderNavLinks(folder, (id) => folderHref(mailbox, id), folderLabels(shell))
-      .map(
-        (item) =>
-          `<a class="folder-chip${item.active ? " active" : ""}" href="${escapeHtml(item.href)}">${escapeHtml(item.label)}</a>`,
-      )
-      .join("")}
-  </nav>`;
+export function inboxEmptyArt(q: string, filter: InboxFilter): "brand" | "mark" | "none" {
+  if (q) {
+    return "none";
+  }
+  if (filter === "all") {
+    return "brand";
+  }
+  return "mark";
+}
+
+export function inboxEmptyAlt(shell: Shell, q: string, filter: InboxFilter): string {
+  if (q || filter !== "all") {
+    return "";
+  }
+  return tr(shell, "empty.inbox-alt");
 }
 
 export function folderMessageRow(
@@ -234,7 +237,7 @@ export function emptyInboxCopy(shell: Shell, count: number, q: string, filter: I
     return "";
   }
   if (q) {
-    return tr(shell, "empty.search", { q });
+    return tr(shell, "empty.search");
   }
   if (filter === "unread") {
     return tr(shell, "empty.unread");

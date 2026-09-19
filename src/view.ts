@@ -1,7 +1,8 @@
 import { cookieValue } from "./auth.ts";
+import { EMPTY_INBOX_SRC } from "./brand-assets.ts";
 import type { Env } from "./env.ts";
 import { loadBranding, type SiteBranding } from "./branding.ts";
-import { SYSTEM_FOLDERS, folderNavLinks, type SystemFolder } from "./folders.ts";
+import { BOX_FOLDERS, boxFolderNavLinks, type SystemFolder } from "./folders.ts";
 import { EMPTY_ART, GROVE_MARK, escapeHtml } from "./html.ts";
 import {
   LOCALE_COOKIE,
@@ -14,11 +15,16 @@ import {
 } from "./i18n.ts";
 import type { MailboxRecord } from "./store.ts";
 import { boxPath, folderHref, inboxHref, withMailbox } from "./ui-paths.ts";
+import { emptyNav, type NavContext } from "./ui-nav.ts";
+
+export type { NavContext } from "./ui-nav.ts";
+export { emptyNav } from "./ui-nav.ts";
 
 export type Shell = {
   locale: Locale;
   preference: LocalePreference;
   brand: SiteBranding;
+  nav: NavContext;
 };
 
 export async function resolveShell(request: Request, env: Env): Promise<Shell> {
@@ -29,7 +35,12 @@ export async function resolveShell(request: Request, env: Env): Promise<Shell> {
     locale: resolveLocale(request),
     preference,
     brand: await loadBranding(env),
+    nav: emptyNav(),
   };
+}
+
+export function withNav(shell: Shell, nav: NavContext): Shell {
+  return { ...shell, nav };
 }
 
 export function tr(shell: Shell, key: string, vars?: Record<string, string | number>): string {
@@ -54,8 +65,16 @@ export function pageTitle(shell: Shell, heading: string): string {
 
 export type NavId = SystemFolder | "unread" | "compose" | "addresses" | "settings" | "admin";
 
-export function emptyBlock(copy: string): string {
-  return `<div class="empty">${EMPTY_ART}<p>${escapeHtml(copy)}</p></div>`;
+export type EmptyArt = "brand" | "mark" | "none";
+
+export function emptyBlock(copy: string, art: EmptyArt = "mark", alt = ""): string {
+  let visual = "";
+  if (art === "brand") {
+    visual = `<img class="empty-photo" src="${escapeHtml(EMPTY_INBOX_SRC)}" alt="${escapeHtml(alt || copy)}" onerror="this.remove()">`;
+  } else if (art === "mark") {
+    visual = EMPTY_ART;
+  }
+  return `<div class="empty">${visual}<p>${escapeHtml(copy)}</p></div>`;
 }
 
 export function folderLabels(shell: Shell): Record<SystemFolder, string> {
@@ -90,6 +109,27 @@ export function layout(opts: {
   const chip = opts.mailbox
     ? `<div class="mailbox-chip"><span class="label">${escapeHtml(tr(opts.shell, "label.current-mailbox"))}</span><span class="addr">${escapeHtml(opts.mailbox.address)}</span></div>`
     : "";
+  const foldersOpen = (BOX_FOLDERS as readonly string[]).includes(opts.nav) ? " open" : "";
+  const folderItems = boxFolderNavLinks(opts.nav, (id) => folderHref(opts.mailbox, id), folderLabels(opts.shell))
+    .map(
+      (item) =>
+        `<li><a class="${item.active ? "active" : ""}" href="${escapeHtml(item.href)}">${escapeHtml(item.label)}</a></li>`,
+    )
+    .join("");
+  const boxItems = thisBoxLinks(opts.shell, opts.nav, settings)
+    .map(
+      (item) =>
+        `<li><a class="${item.active ? "active" : ""}" href="${escapeHtml(item.href)}">${escapeHtml(item.label)}</a></li>`,
+    )
+    .join("");
+  const desk = opts.shell.nav.showAdmin
+    ? `<p class="nav-desk"><a class="${opts.nav === "admin" ? "active" : ""}" href="/admin">${escapeHtml(tr(opts.shell, "nav.admin"))}</a></p>`
+    : "";
+  const moreInner = `${folderItems}${boxItems}${
+    opts.shell.nav.showAdmin
+      ? `<li><a class="${opts.nav === "admin" ? "active" : ""}" href="/admin">${escapeHtml(tr(opts.shell, "nav.admin"))}</a></li>`
+      : ""
+  }`;
 
   return `<!DOCTYPE html>
 <html lang="${documentLang(opts.shell)}">
@@ -104,30 +144,72 @@ export function layout(opts: {
     <aside class="nav">
       ${brandLink(opts.shell, inbox)}
       <ul class="nav-list">
-        ${folderNavLinks(opts.nav, (id) => folderHref(opts.mailbox, id), folderLabels(opts.shell))
-          .map((item) => {
-            const badge = item.id === "inbox" ? countBadge : "";
-            return `<li><a class="${item.active ? "active" : ""}" href="${escapeHtml(item.href)}">${escapeHtml(item.label)}${badge}</a></li>`;
-          })
-          .join("")}
-        <li><a class="${opts.nav === "unread" ? "active" : ""}" href="${escapeHtml(unreadHref)}">${escapeHtml(tr(opts.shell, "nav.unread"))}</a></li>
-      </ul>
-      <ul class="nav-list nav-tools">
         <li><a class="${opts.nav === "compose" ? "active" : ""}" href="${escapeHtml(compose)}">${escapeHtml(tr(opts.shell, "nav.compose"))}</a></li>
-        <li><a class="${opts.nav === "addresses" ? "active" : ""}" href="/addresses">${escapeHtml(tr(opts.shell, "nav.addresses"))}</a></li>
-        <li><a class="${opts.nav === "admin" ? "active" : ""}" href="/admin">${escapeHtml(tr(opts.shell, "nav.admin"))}</a></li>
+      </ul>
+      <div class="nav-group">
+        <p class="nav-group-label">${escapeHtml(tr(opts.shell, "nav.mailbox"))}</p>
+        <ul class="nav-list">
+          <li><a class="${opts.nav === "inbox" ? "active" : ""}" href="${escapeHtml(inbox)}">${escapeHtml(tr(opts.shell, "nav.inbox"))}${countBadge}</a></li>
+          <li><a class="${opts.nav === "unread" ? "active" : ""}" href="${escapeHtml(unreadHref)}">${escapeHtml(tr(opts.shell, "nav.unread"))}</a></li>
+        </ul>
+      </div>
+      <details class="nav-group nav-folders"${foldersOpen}>
+        <summary class="nav-group-label">${escapeHtml(tr(opts.shell, "nav.folders"))}</summary>
+        <ul class="nav-list">${folderItems}</ul>
+      </details>
+      <div class="nav-group">
+        <p class="nav-group-label">${escapeHtml(tr(opts.shell, "nav.this-box"))}</p>
+        <ul class="nav-list">${boxItems}</ul>
+      </div>
+      <ul class="nav-list nav-tools">
         <li><a class="${opts.nav === "settings" ? "active" : ""}" href="${escapeHtml(settings)}">${escapeHtml(tr(opts.shell, "nav.settings"))}</a></li>
       </ul>
+      ${desk}
       ${chip}
     </aside>
+    <div class="more-bar">
+      <details class="more-drawer">
+        <summary>${escapeHtml(tr(opts.shell, "nav.more"))}</summary>
+        <ul class="nav-list">${moreInner}</ul>
+      </details>
+    </div>
     ${opts.body}
   </div>
   <nav class="mobile-nav" aria-label="${escapeHtml(tr(opts.shell, "nav.main"))}">
-    <a class="${(SYSTEM_FOLDERS as readonly string[]).includes(opts.nav) ? "active" : ""}" href="${escapeHtml(inbox)}">${escapeHtml(tr(opts.shell, "nav.inbox"))}${countBadge}</a>
+    <a class="${opts.nav === "inbox" ? "active" : ""}" href="${escapeHtml(inbox)}">${escapeHtml(tr(opts.shell, "nav.inbox"))}${countBadge}</a>
     <a class="${opts.nav === "unread" ? "active" : ""}" href="${escapeHtml(unreadHref)}">${escapeHtml(tr(opts.shell, "nav.unread"))}</a>
     <a class="${opts.nav === "compose" ? "active" : ""}" href="${escapeHtml(compose)}">${escapeHtml(tr(opts.shell, "nav.compose"))}</a>
     <a class="${opts.nav === "settings" ? "active" : ""}" href="${escapeHtml(settings)}">${escapeHtml(tr(opts.shell, "nav.settings"))}</a>
   </nav>
 </body>
 </html>`;
+}
+
+function thisBoxLinks(
+  shell: Shell,
+  nav: NavId,
+  settings: string,
+): { href: string; label: string; active: boolean }[] {
+  const links = [
+    {
+      href: "/addresses",
+      label: tr(shell, "nav.addresses"),
+      active: nav === "addresses",
+    },
+  ];
+  if (shell.nav.hasAliases) {
+    links.push({
+      href: `${settings}#aliases`,
+      label: tr(shell, "nav.aliases"),
+      active: false,
+    });
+  }
+  if (shell.nav.hasApiKey) {
+    links.push({
+      href: `${settings}#api-key`,
+      label: tr(shell, "nav.api-key"),
+      active: false,
+    });
+  }
+  return links;
 }
