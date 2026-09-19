@@ -78,6 +78,22 @@ npm run dev
 
 `wrangler dev` serves the Worker at `http://127.0.0.1:8787` by default.
 
+### Unit tests (MemoryD1)
+
+`npm test` uses a shared in-memory D1 (`test/helpers/memory-d1.ts`) instead of each file inventing its own fake. Seed the tables the test needs, then pass `db.asDatabase()` as `env.DB`:
+
+```ts
+import { MemoryD1 } from "./helpers/memory-d1.ts";
+
+const db = new MemoryD1({
+  mailboxes: [{ id, address, status: "active", created_at: 1, updated_at: 1 }],
+  messages: [{ id, mailbox_id, folder: "inbox", received_at: 1 }],
+});
+const env = { DB: db.asDatabase(), SESSION_SECRET, OWNER_TOKEN, ADMIN_TOKEN };
+```
+
+`MemoryR2` is in the same module for inbound persist / download tests. If a new SQL path misses, extend the helper — do not add another in-file MemoryD1. MIME malice samples live under `test/fixtures/mime/` (nested multipart, odd boundary, lying Content-Type, path-traversal names, missing boundary, oversized part).
+
 ### Inbox (local)
 
 Inbox HTML (`/`, `/box/:id`, read/delete) and `/api/mailboxes` / `/api/messages` call `requireOwner`. Without a session they return **401** (`unauthorized` plus the same hint as `src/auth.ts`). `/healthz` and inbound Email Routing stay public. `/app.css` stays public so the login page can load.
@@ -116,7 +132,7 @@ Re-seed with `npm run seed:local` if you want the sample rows and the R2 object 
 
 ### Attachments (R2 + size limits)
 
-Inbound MIME parts with `Content-Disposition: attachment` (or a filename / non-text body part) are stored in the `ATTACHMENTS` R2 bucket. Metadata lives in D1 (`attachments`). The read view lists them; `GET /attachments/:id` streams the bytes after `requireOwner`.
+Inbound MIME parts with `Content-Disposition: attachment` (or a filename / non-text body part) are stored in the `ATTACHMENTS` R2 bucket. Metadata lives in D1 (`attachments`). Filenames are stored as the basename only (`../etc/passwd` → `passwd`); R2 keys apply the same strip. The read view lists them; `GET /attachments/:id` streams the bytes after `requireOwner`. HTML / SVG / XML declared types download as `application/octet-stream`.
 
 | Knob | Where | Default | Role |
 |------|--------|---------|------|
@@ -697,7 +713,7 @@ Then, in the Cloudflare dashboard, enable Email Routing for your domain and add 
 | `src/inbound.ts` | Email Routing stub persist + +tag / alias resolve + attachment limits |
 | `src/attachment-limits.ts` | Size / count caps and human-readable over-limit errors |
 | `src/attachments.ts` | R2 store / owner download / read-view links |
-| `src/mime.ts` | Plain-text body extract + inbound MIME attachments |
+| `src/mime.ts` | Plain-text body extract + inbound MIME attachments (path-safe filenames) |
 | `src/api.ts` | JSON list / read / delete / send / search / star / threads / aliases |
 | `src/ui.ts` | Inbox HTML + compose / reply / forward form |
 | `src/reply.ts` | Reply / reply-all / forward prefill + header helpers |
@@ -725,6 +741,8 @@ Then, in the Cloudflare dashboard, enable Email Routing for your domain and add 
 | `migrations/0015_outbound_outbox.sql` | `outbound_attempts` pending + idempotency_key + retry columns |
 | `scripts/seed-local.sql` | Local sample mailboxes + messages (not for remote) |
 | `scripts/seed-grove-note.txt` | Local sample attachment bytes |
+| `test/helpers/memory-d1.ts` | Shared in-memory D1 / R2 for unit tests |
+| `test/fixtures/mime/` | Malicious / odd inbound MIME samples |
 | `wrangler.jsonc` | Worker + D1 + R2 bindings (placeholders) |
 | `.dev.vars.example` | Local secret / outbound / attachment-cap / Turnstile / REST limit template |
 

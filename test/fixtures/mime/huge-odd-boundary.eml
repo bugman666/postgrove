@@ -1,0 +1,21 @@
+From: sender@example.com
+To: inbox@example.test
+Subject: odd boundary
+Date: Sat, 19 Sep 2026 12:00:00 +0000
+Message-ID: <huge-odd-boundary@example.test>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="=_Odd/Boundary?with spaces and 0123456789abcdef0123456789ab_="
+
+--=_Odd/Boundary?with spaces and 0123456789abcdef0123456789ab_=
+Content-Type: text/plain; charset=utf-8
+
+Body next to an odd quoted boundary.
+
+--=_Odd/Boundary?with spaces and 0123456789abcdef0123456789ab_=
+Content-Type: application/octet-stream; name=odd.bin
+Content-Disposition: attachment; filename="odd.bin"
+Content-Transfer-Encoding: base64
+
+b2Rk
+
+--=_Odd/Boundary?with spaces and 0123456789abcdef0123456789ab_=--

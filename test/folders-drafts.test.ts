@@ -23,13 +23,12 @@ import {
   updateDraft,
   type MailboxRecord,
 } from "../src/store.ts";
+import { MemoryD1, type MemoryRow } from "./helpers/memory-d1.ts";
 
 const SECRET = "change-me-local-session-secret";
 const FROM = "inbox@example.test";
 const MAILBOX_ID = "11111111-1111-4111-8111-111111111111";
 const INBOX_ID = "22222222-2222-4222-8222-222222222221";
-
-type Row = Record<string, unknown>;
 
 const MAILBOX: MailboxRecord = {
   id: MAILBOX_ID,
@@ -40,195 +39,7 @@ const MAILBOX: MailboxRecord = {
   status: "active",
 };
 
-class MemoryD1 {
-  mailboxes: Row[] = [
-    {
-      ...MAILBOX,
-      created_at: 1,
-      updated_at: 1,
-    },
-  ];
-  messages: Row[] = [
-    messageRow({
-      id: INBOX_ID,
-      envelope_from: "neighbor@example.test",
-      envelope_to: FROM,
-      subject: "欢迎使用本地收件箱",
-      snippet: "已读种子",
-      body_text: "已读种子正文",
-      is_read: 1,
-      folder: "inbox",
-    }),
-  ];
-
-  prepare(sql: string) {
-    return new MemoryStatement(this, sql);
-  }
-}
-
-class MemoryStatement {
-  db: MemoryD1;
-  sql: string;
-  binds: unknown[] = [];
-
-  constructor(db: MemoryD1, sql: string) {
-    this.db = db;
-    this.sql = sql;
-  }
-
-  bind(...args: unknown[]) {
-    this.binds = args;
-    return this;
-  }
-
-  async first() {
-    return this.rows()[0] ?? null;
-  }
-
-  async all() {
-    return { results: this.rows() };
-  }
-
-  async run() {
-    return { meta: { changes: this.mutate() } };
-  }
-
-  rows() {
-    const sql = collapse(this.sql);
-    const [a, b] = this.binds;
-
-    if (sql.includes("from mailboxes")) {
-      if (sql.includes("where address =")) {
-        return this.db.mailboxes.filter((row) => row.address === String(a).toLowerCase());
-      }
-      if (sql.includes("where id =")) {
-        return this.db.mailboxes.filter((row) => row.id === a);
-      }
-      return this.db.mailboxes;
-    }
-    if (sql.includes("from messages")) {
-      let rows = this.db.messages.slice();
-      if (sql.includes("where id =") && sql.includes("mailbox_id =") && sql.includes("folder = 'inbox'")) {
-        rows = rows.filter((row) => row.id === a && row.mailbox_id === b && row.folder === "inbox");
-      } else if (sql.includes("where id =") && sql.includes("mailbox_id =")) {
-        rows = rows.filter((row) => row.id === a && row.mailbox_id === b);
-      } else if (sql.includes("where id =")) {
-        rows = rows.filter((row) => row.id === a);
-      } else if (sql.includes("folder = 'inbox'")) {
-        rows = rows.filter((row) => row.mailbox_id === a && row.folder === "inbox");
-      } else if (sql.includes("folder = ?2") || sql.includes("and folder = ?")) {
-        rows = rows.filter((row) => row.mailbox_id === a && row.folder === b);
-      } else if (sql.includes("mailbox_id =")) {
-        rows = rows.filter((row) => row.mailbox_id === a);
-      }
-      return rows.sort((left, right) => Number(right.received_at) - Number(left.received_at));
-    }
-    return [];
-  }
-
-  mutate() {
-    const sql = collapse(this.sql);
-    const binds = this.binds;
-
-    if (sql.startsWith("insert into messages")) {
-      this.db.messages.unshift({
-        id: binds[0],
-        mailbox_id: binds[1],
-        rfc_message_id: binds[2],
-        envelope_from: binds[3],
-        envelope_to: binds[4],
-        subject: binds[5],
-        snippet: binds[6],
-        body_text: binds[7],
-        header_to: binds[8],
-        header_cc: binds[9],
-        header_reply_to: binds[10],
-        in_reply_to: binds[11],
-        references_header: binds[12],
-        size_bytes: binds[13],
-        is_read: binds[14],
-        is_starred: binds[15],
-        folder: binds[16],
-        received_at: binds[17],
-        created_at: binds[18],
-      });
-      return 1;
-    }
-
-    if (sql.includes("set folder = 'trash'")) {
-      return this.updateMessages(
-        (row) => row.id === binds[0] && row.mailbox_id === binds[1] && row.folder !== "trash",
-        (row) => {
-          row.folder = "trash";
-        },
-      );
-    }
-
-    if (sql.includes("set folder = ?3")) {
-      return this.updateMessages(
-        (row) => row.id === binds[0] && row.mailbox_id === binds[1],
-        (row) => {
-          row.folder = binds[2];
-        },
-      );
-    }
-
-    if (sql.includes("folder = 'sent'")) {
-      return this.updateMessages(
-        (row) => row.id === binds[0] && row.mailbox_id === binds[1] && row.folder === "draft",
-        (row) => {
-          row.folder = "sent";
-          row.envelope_from = binds[2];
-          row.envelope_to = binds[3];
-          row.subject = binds[4];
-          row.snippet = binds[5];
-          row.body_text = binds[6];
-          row.header_cc = binds[7];
-          row.in_reply_to = binds[8];
-          row.references_header = binds[9];
-          row.is_read = 1;
-          row.received_at = binds[10];
-        },
-      );
-    }
-
-    if (sql.includes("folder = 'draft'")) {
-      return this.updateMessages(
-        (row) => row.id === binds[0] && row.mailbox_id === binds[1] && row.folder === "draft",
-        (row) => {
-          row.envelope_from = binds[2];
-          row.envelope_to = binds[3];
-          row.subject = binds[4];
-          row.snippet = binds[5];
-          row.body_text = binds[6];
-          row.header_cc = binds[7];
-          row.in_reply_to = binds[8];
-          row.references_header = binds[9];
-          row.received_at = binds[10];
-        },
-      );
-    }
-
-    return 0;
-  }
-
-  updateMessages(match: (row: Row) => boolean, apply: (row: Row) => void) {
-    let changes = 0;
-    for (const row of this.db.messages) {
-      if (match(row)) {
-        apply(row);
-        changes += 1;
-      }
-    }
-    return changes;
-  }
-}
-
-function collapse(sql: string): string {
-  return sql.replace(/\s+/g, " ").trim().toLowerCase();
-}
-
-function messageRow(overrides: Row): Row {
+function messageRow(overrides: MemoryRow): MemoryRow {
   return {
     id: "msg",
     mailbox_id: MAILBOX_ID,
@@ -253,9 +64,33 @@ function messageRow(overrides: Row): Row {
   };
 }
 
-function testEnv(db = new MemoryD1()): Env {
+function seededDb(): MemoryD1 {
+  return new MemoryD1({
+    mailboxes: [
+      {
+        ...MAILBOX,
+        created_at: 1,
+        updated_at: 1,
+      },
+    ],
+    messages: [
+      messageRow({
+        id: INBOX_ID,
+        envelope_from: "neighbor@example.test",
+        envelope_to: FROM,
+        subject: "欢迎使用本地收件箱",
+        snippet: "已读种子",
+        body_text: "已读种子正文",
+        is_read: 1,
+        folder: "inbox",
+      }),
+    ],
+  });
+}
+
+function testEnv(db = seededDb()): Env {
   return {
-    DB: db as unknown as D1Database,
+    DB: db.asDatabase(),
     SESSION_SECRET: SECRET,
     OWNER_TOKEN: "change-me-local-owner-token",
     ADMIN_TOKEN: "change-me-local-admin-token",

@@ -1,0 +1,28 @@
+From: sender@example.com
+To: inbox@example.test
+Subject: traversal names
+Date: Sat, 19 Sep 2026 12:00:00 +0000
+Message-ID: <path-traversal@example.test>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="trav"
+
+--trav
+Content-Type: text/plain; charset=utf-8
+
+Names should not keep directory prefixes.
+
+--trav
+Content-Type: text/plain; name="../../etc/passwd"
+Content-Disposition: attachment; filename="../../etc/passwd"
+Content-Transfer-Encoding: 7bit
+
+root:x:0:0:root:/root:/bin/sh
+
+--trav
+Content-Type: application/octet-stream
+Content-Disposition: attachment; filename*=UTF-8''%2e%2e%2fwindows%5csystem32%5cshadow
+Content-Transfer-Encoding: 7bit
+
+x
+
+--trav--

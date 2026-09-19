@@ -20,6 +20,7 @@ import {
   mailboxAllowed,
   type UserRecord,
 } from "../src/users.ts";
+import { MemoryD1 } from "./helpers/memory-d1.ts";
 
 const SECRET = "change-me-local-session-secret";
 const OWNER = "change-me-local-owner-token";
@@ -46,265 +47,29 @@ const EMPTY = {
   updated_at: 2,
 };
 
-type Row = Record<string, unknown>;
-
-class MemoryD1 {
-  users: Row[] = [];
-  user_mailboxes: Row[] = [];
-  send_usage: Row[] = [];
-  mailboxes: Row[] = [{ ...INBOX }, { ...EMPTY }];
-  messages: Row[] = [
-    {
-      id: "22222222-2222-4222-8222-222222222221",
-      mailbox_id: INBOX.id,
-      envelope_from: "neighbor@example.test",
-      envelope_to: INBOX.address,
-      subject: "欢迎",
-      snippet: "种子",
-      size_bytes: 220,
-      folder: "inbox",
-      received_at: 10,
-      created_at: 10,
-    },
-  ];
-
-  prepare(sql: string) {
-    return new MemoryStatement(this, sql);
-  }
+function seededDb(): MemoryD1 {
+  return new MemoryD1({
+    mailboxes: [{ ...INBOX }, { ...EMPTY }],
+    messages: [
+      {
+        id: "22222222-2222-4222-8222-222222222221",
+        mailbox_id: INBOX.id,
+        envelope_from: "neighbor@example.test",
+        envelope_to: INBOX.address,
+        subject: "欢迎",
+        snippet: "种子",
+        size_bytes: 220,
+        folder: "inbox",
+        received_at: 10,
+        created_at: 10,
+      },
+    ],
+  });
 }
 
-class MemoryStatement {
-  db: MemoryD1;
-  sql: string;
-  binds: unknown[] = [];
-
-  constructor(db: MemoryD1, sql: string) {
-    this.db = db;
-    this.sql = sql;
-  }
-
-  bind(...args: unknown[]) {
-    this.binds = args;
-    return this;
-  }
-
-  async first() {
-    return this.rows()[0] ?? null;
-  }
-
-  async all() {
-    return { results: this.rows() };
-  }
-
-  async run() {
-    return { meta: { changes: this.mutate() } };
-  }
-
-  rows(): Row[] {
-    const sql = collapse(this.sql);
-    const [a, b] = this.binds;
-
-    if (sql.includes("from sqlite_master")) {
-      return [
-        "mailboxes",
-        "messages",
-        "outbound_attempts",
-        "api_tokens",
-        "users",
-        "inbound_hooks",
-        "inbound_deliveries",
-        "dev_inboxes",
-      ].map((name) => ({ name }));
-    }
-    if (sql.includes("from users")) {
-      let rows = this.db.users.slice();
-      if (sql.includes("from user_mailboxes where mailbox_id")) {
-        const ids = new Set(
-          this.db.user_mailboxes.filter((row) => row.mailbox_id === a).map((row) => row.user_id),
-        );
-        rows = rows.filter((row) => ids.has(row.id));
-        if (sql.includes("status = 'active'")) {
-          rows = rows.filter((row) => row.status === "active");
-        }
-      } else if (sql.includes("where login =")) {
-        rows = rows.filter((row) => String(row.login).toLowerCase() === String(a).toLowerCase());
-      } else if (sql.includes("where id =")) {
-        rows = rows.filter((row) => row.id === a);
-      }
-      return rows;
-    }
-    if (sql.includes("from user_mailboxes") && !sql.includes("from messages") && !sql.includes("from users") && !sql.includes("from mailboxes")) {
-      let rows = this.db.user_mailboxes.slice();
-      if (sql.includes("where user_id =")) {
-        rows = rows.filter((row) => row.user_id === a);
-      }
-      if (sql.includes("select count(*)")) {
-        return [{ n: rows.length }];
-      }
-      if (sql.includes("select mailbox_id")) {
-        return rows;
-      }
-      return rows;
-    }
-    if (sql.includes("from send_usage")) {
-      const rows = this.db.send_usage.filter((row) => row.user_id === a && row.day === b);
-      return rows;
-    }
-    if (sql.includes("from mailboxes")) {
-      let rows = this.db.mailboxes.slice();
-      if (sql.includes("where address =")) {
-        rows = rows.filter((row) => row.address === String(a).toLowerCase());
-      } else if (sql.includes("where id =")) {
-        rows = rows.filter((row) => row.id === a);
-      } else if (sql.includes("select mailbox_id from user_mailboxes")) {
-        const ids = new Set(
-          this.db.user_mailboxes.filter((row) => row.user_id === a).map((row) => row.mailbox_id),
-        );
-        rows = rows.filter((row) => ids.has(row.id));
-      }
-      return rows;
-    }
-    if (sql.includes("from messages")) {
-      let rows = this.db.messages.slice();
-      if (sql.includes("sum(size_bytes)") || sql.includes("as used")) {
-        const ids = new Set(
-          this.db.user_mailboxes.filter((row) => row.user_id === a).map((row) => row.mailbox_id),
-        );
-        const used = rows
-          .filter((row) => ids.has(row.mailbox_id))
-          .reduce((sum, row) => sum + Number(row.size_bytes ?? 0), 0);
-        return [{ used }];
-      }
-      if (sql.includes("where id =") && sql.includes("mailbox_id =")) {
-        rows = rows.filter((row) => row.id === a && row.mailbox_id === b);
-      } else if (sql.includes("where id =")) {
-        rows = rows.filter((row) => row.id === a);
-      } else if (sql.includes("mailbox_id =")) {
-        rows = rows.filter((row) => row.mailbox_id === a);
-      }
-      return rows.sort((left, right) => Number(right.received_at) - Number(left.received_at));
-    }
-    if (sql.includes("from outbound_attempts")) {
-      return [];
-    }
-    return [];
-  }
-
-  mutate(): number {
-    const sql = collapse(this.sql);
-    const binds = this.binds;
-
-    if (sql.startsWith("insert into users")) {
-      this.db.users.push({
-        id: binds[0],
-        login: binds[1],
-        display_name: binds[2],
-        role: binds[3],
-        status: binds[4],
-        token_salt: binds[5],
-        token_hash: binds[6],
-        quota_addresses: binds[7],
-        quota_storage_bytes: binds[8],
-        quota_send_daily: binds[9],
-        created_at: binds[10],
-        updated_at: binds[11],
-      });
-      return 1;
-    }
-    if (sql.startsWith("insert or ignore into user_mailboxes") || sql.startsWith("insert into user_mailboxes")) {
-      const exists = this.db.user_mailboxes.some(
-        (row) => row.user_id === binds[0] && row.mailbox_id === binds[1],
-      );
-      if (!exists) {
-        this.db.user_mailboxes.push({
-          user_id: binds[0],
-          mailbox_id: binds[1],
-          created_at: binds[2],
-        });
-        return 1;
-      }
-      return 0;
-    }
-    if (sql.startsWith("insert into mailboxes")) {
-      this.db.mailboxes.push({
-        id: binds[0],
-        address: binds[1],
-        local_part: binds[2],
-        domain: binds[3],
-        display_name: binds[4],
-        status: binds[5],
-        created_at: binds[6],
-        updated_at: binds[7],
-      });
-      return 1;
-    }
-    if (sql.startsWith("insert into messages")) {
-      this.db.messages.unshift({
-        id: binds[0],
-        mailbox_id: binds[1],
-        envelope_from: binds[3],
-        envelope_to: binds[4],
-        subject: binds[5],
-        snippet: binds[6],
-        size_bytes: binds[13],
-        folder: binds[16],
-        received_at: binds[17],
-        created_at: binds[18],
-      });
-      return 1;
-    }
-    if (sql.startsWith("insert into outbound_attempts")) {
-      return 1;
-    }
-    if (sql.startsWith("insert into send_usage")) {
-      const existing = this.db.send_usage.find((row) => row.user_id === binds[0] && row.day === binds[1]);
-      if (existing) {
-        existing.count = Number(existing.count) + 1;
-      } else {
-        this.db.send_usage.push({ user_id: binds[0], day: binds[1], count: 1 });
-      }
-      return 1;
-    }
-    if (sql.startsWith("update users set status")) {
-      const row = this.db.users.find((item) => item.id === binds[0]);
-      if (!row) {
-        return 0;
-      }
-      row.status = binds[1];
-      row.updated_at = binds[2];
-      return 1;
-    }
-    if (sql.startsWith("update users set quota_addresses")) {
-      const row = this.db.users.find((item) => item.id === binds[0]);
-      if (!row) {
-        return 0;
-      }
-      row.quota_addresses = binds[1];
-      row.quota_storage_bytes = binds[2];
-      row.quota_send_daily = binds[3];
-      row.updated_at = binds[4];
-      return 1;
-    }
-    if (sql.startsWith("update mailboxes set status")) {
-      const row = this.db.mailboxes.find((item) => item.id === binds[0]);
-      if (!row) {
-        return 0;
-      }
-      row.status = binds[1];
-      row.updated_at = binds[2];
-      return 1;
-    }
-    return 0;
-  }
-}
-
-function collapse(sql: string): string {
-  return sql.replace(/\s+/g, " ").trim().toLowerCase();
-}
-
-function testEnv(db = new MemoryD1(), overrides: Partial<Env> = {}): Env {
+function testEnv(db = seededDb(), overrides: Partial<Env> = {}): Env {
   return {
-    DB: db as unknown as D1Database,
+    DB: db.asDatabase(),
     SESSION_SECRET: SECRET,
     OWNER_TOKEN: OWNER,
     ADMIN_TOKEN: ADMIN,
@@ -354,7 +119,7 @@ test("hashUserToken is stable for the local seed pair", async () => {
 });
 
 test("TC10.1 admin can create and list mailbox users", async () => {
-  const db = new MemoryD1();
+  const db = seededDb();
   const env = testEnv(db);
   const created = await handleAdmin(
     new Request("http://127.0.0.1:8787/admin/users", {
@@ -400,7 +165,7 @@ test("TC10.1 admin can create and list mailbox users", async () => {
 });
 
 test("TC10.2 mailbox session cannot read another mailbox or admin API", async () => {
-  const db = new MemoryD1();
+  const db = seededDb();
   const user = await seedMember(db);
   const env = testEnv(db);
   const token = await signUserSession(SECRET, {
@@ -442,7 +207,7 @@ test("TC10.2 mailbox session cannot read another mailbox or admin API", async ()
 });
 
 test("TC10.3 admin audit lists users and mail read-only", async () => {
-  const db = new MemoryD1();
+  const db = seededDb();
   await seedMember(db);
   const env = testEnv(db);
   const messages = await handleAdmin(
@@ -473,7 +238,7 @@ test("TC10.3 admin audit lists users and mail read-only", async () => {
 });
 
 test("TC10.4 quotas fail loud for address / storage / send", async () => {
-  const db = new MemoryD1();
+  const db = seededDb();
   const user = await seedMember(db, {
     quotaAddresses: 1,
     quotaStorage: 100,
@@ -593,7 +358,7 @@ test("OWNER_TOKEN and ADMIN_TOKEN still work as documented", async () => {
 });
 
 test("member token logs into the bound mailbox", async () => {
-  const db = new MemoryD1();
+  const db = seededDb();
   const user = await seedMember(db);
   const env = testEnv(db);
   const login = await handleAuthRoutes(
@@ -612,7 +377,7 @@ test("member token logs into the bound mailbox", async () => {
 });
 
 test("disabled member cannot keep using the session", async () => {
-  const db = new MemoryD1();
+  const db = seededDb();
   const user = await seedMember(db);
   const env = testEnv(db);
   await handleAdmin(
@@ -646,7 +411,7 @@ test("disabled member cannot keep using the session", async () => {
 });
 
 test("admin-role mailbox session can open admin routes", async () => {
-  const db = new MemoryD1();
+  const db = seededDb();
   const user = await seedMember(db, { login: "keeper", role: "admin", mailboxId: EMPTY.id });
   const env = testEnv(db);
   const token = await signUserSession(SECRET, {
@@ -715,7 +480,7 @@ test("owner session stays bound to the login mailbox", async () => {
 });
 
 test("member can create an address under quota", async () => {
-  const db = new MemoryD1();
+  const db = seededDb();
   const user = await seedMember(db, { quotaAddresses: 3 });
   const env = testEnv(db);
   const token = await signUserSession(SECRET, {
@@ -768,7 +533,7 @@ test("TC10.2 owner session is 403 on admin APIs and other mailboxes", async () =
 });
 
 test("TC10.2 member cannot read another mailbox's message", async () => {
-  const db = new MemoryD1();
+  const db = seededDb();
   const user = await seedMember(db);
   const env = testEnv(db);
   const token = await signUserSession(SECRET, {
@@ -817,7 +582,7 @@ test("TC10.3 admin cannot write the mail audit list", async () => {
 });
 
 test("TC10.4 under-quota storage is allowed", async () => {
-  const db = new MemoryD1();
+  const db = seededDb();
   await seedMember(db, { quotaStorage: 500 });
   db.messages.push({
     id: "m-small",
@@ -834,7 +599,7 @@ test("TC10.4 under-quota storage is allowed", async () => {
 });
 
 test("TC10.1 invalid mailbox does not leave a half-created member", async () => {
-  const db = new MemoryD1();
+  const db = seededDb();
   const env = testEnv(db);
   const created = await handleAdmin(
     new Request("http://127.0.0.1:8787/admin/users", {

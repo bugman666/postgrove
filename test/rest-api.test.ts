@@ -26,6 +26,7 @@ import {
   setTurnstileFetchForTests,
   verifyTurnstile,
 } from "../src/turnstile.ts";
+import { MemoryD1 } from "./helpers/memory-d1.ts";
 
 const SECRET = "change-me-local-session-secret";
 const ADMIN = "change-me-local-admin-token";
@@ -76,186 +77,19 @@ const MESSAGE_B = {
   body_text: "secret of B",
 };
 
-type Row = Record<string, unknown>;
-
-class MemoryD1 {
-  mailboxes: Row[] = [
-    { ...MAILBOX_A, created_at: 1, updated_at: 1 },
-    { ...MAILBOX_B, created_at: 2, updated_at: 2 },
-  ];
-  messages: Row[] = [{ ...MESSAGE_A }, { ...MESSAGE_B }];
-  tokens: Row[] = [];
-  attempts: Row[] = [];
-
-  prepare(sql: string) {
-    return new MemoryStatement(this, sql);
-  }
-}
-
-class MemoryStatement {
-  db: MemoryD1;
-  sql: string;
-  binds: unknown[] = [];
-
-  constructor(db: MemoryD1, sql: string) {
-    this.db = db;
-    this.sql = sql;
-  }
-
-  bind(...args: unknown[]) {
-    this.binds = args;
-    return this;
-  }
-
-  async first() {
-    return this.rows()[0] ?? null;
-  }
-
-  async all() {
-    return { results: this.rows() };
-  }
-
-  async run() {
-    return { meta: { changes: this.mutate() } };
-  }
-
-  rows() {
-    const sql = collapse(this.sql);
-    const [a, b] = this.binds;
-    if (sql.includes("from mailboxes")) {
-      if (sql.includes("where address =")) {
-        return this.db.mailboxes.filter((row) => row.address === String(a).toLowerCase());
-      }
-      if (sql.includes("where id =")) {
-        return this.db.mailboxes.filter((row) => row.id === a);
-      }
-      return this.db.mailboxes.slice().sort((left, right) => Number(left.created_at) - Number(right.created_at));
-    }
-    if (sql.includes("from api_tokens")) {
-      let rows = this.db.tokens.slice();
-      if (sql.includes("where token_hash =")) {
-        rows = rows.filter((row) => row.token_hash === a);
-      } else if (sql.includes("where id =")) {
-        rows = rows.filter((row) => row.id === a);
-      } else if (sql.includes("where mailbox_id =")) {
-        rows = rows.filter((row) => row.mailbox_id === a);
-      }
-      return rows.sort((left, right) => Number(right.created_at) - Number(left.created_at));
-    }
-    if (sql.includes("from messages")) {
-      let rows = this.db.messages.slice();
-      if (sql.includes("where id =") && sql.includes("mailbox_id =") && sql.includes("folder = 'inbox'")) {
-        rows = rows.filter((row) => row.id === a && row.mailbox_id === b && row.folder === "inbox");
-      } else if (sql.includes("where id =") && sql.includes("mailbox_id =")) {
-        rows = rows.filter((row) => row.id === a && row.mailbox_id === b);
-      } else if (sql.includes("where id =")) {
-        rows = rows.filter((row) => row.id === a);
-      } else if (sql.includes("folder = 'inbox'")) {
-        rows = rows.filter((row) => row.mailbox_id === a && row.folder === "inbox");
-      } else if (sql.includes("and folder = ?")) {
-        rows = rows.filter((row) => row.mailbox_id === a && row.folder === b);
-      } else if (sql.includes("mailbox_id =")) {
-        rows = rows.filter((row) => row.mailbox_id === a);
-      }
-      return rows.sort((left, right) => Number(right.received_at) - Number(left.received_at));
-    }
-    return [];
-  }
-
-  mutate() {
-    const sql = collapse(this.sql);
-    const binds = this.binds;
-    if (sql.startsWith("insert into mailboxes")) {
-      this.db.mailboxes.push({
-        id: binds[0],
-        address: binds[1],
-        local_part: binds[2],
-        domain: binds[3],
-        display_name: binds[4],
-        status: binds[5],
-        created_at: binds[6],
-        updated_at: binds[7],
-      });
-      return 1;
-    }
-    if (sql.startsWith("insert into api_tokens")) {
-      this.db.tokens.push({
-        id: binds[0],
-        mailbox_id: binds[1],
-        token_hash: binds[2],
-        token_prefix: binds[3],
-        label: binds[4],
-        created_at: binds[5],
-        revoked_at: null,
-        kind: binds[6] ?? "mailbox",
-        quota_requests_daily: binds[7] ?? 0,
-        quota_send_daily: binds[8] ?? 0,
-      });
-      return 1;
-    }
-    if (sql.includes("update api_tokens set revoked_at")) {
-      const row = this.db.tokens.find((item) => item.id === binds[0] && item.revoked_at == null);
-      if (!row) {
-        return 0;
-      }
-      row.revoked_at = binds[1];
-      return 1;
-    }
-    if (sql.includes("update messages set is_read")) {
-      const row = this.db.messages.find(
-        (item) => item.id === binds[0] && item.mailbox_id === binds[1] && item.folder === "inbox",
-      );
-      if (!row) {
-        return 0;
-      }
-      row.is_read = binds[2];
-      return 1;
-    }
-    if (sql.startsWith("insert into messages")) {
-      this.db.messages.unshift({
-        id: binds[0],
-        mailbox_id: binds[1],
-        rfc_message_id: binds[2],
-        envelope_from: binds[3],
-        envelope_to: binds[4],
-        subject: binds[5],
-        snippet: binds[6],
-        body_text: binds[7],
-        header_to: binds[8],
-        header_cc: binds[9],
-        header_reply_to: binds[10],
-        in_reply_to: binds[11],
-        references_header: binds[12],
-        size_bytes: binds[13],
-        is_read: binds[14],
-        is_starred: binds[15],
-        folder: binds[16],
-        received_at: binds[17],
-        created_at: binds[18],
-      });
-      return 1;
-    }
-    if (sql.startsWith("insert into outbound_attempts")) {
-      this.db.attempts.push({
-        id: binds[0],
-        mailbox_id: binds[1],
-        from_address: binds[2],
-        to_address: binds[3],
-        status: binds[10],
-      });
-      return 1;
-    }
-    return 0;
-  }
-}
-
-function collapse(sql: string): string {
-  return sql.replace(/\s+/g, " ").trim().toLowerCase();
+function seededDb(): MemoryD1 {
+  return new MemoryD1({
+    mailboxes: [
+      { ...MAILBOX_A, created_at: 1, updated_at: 1 },
+      { ...MAILBOX_B, created_at: 2, updated_at: 2 },
+    ],
+    messages: [{ ...MESSAGE_A }, { ...MESSAGE_B }],
+  });
 }
 
 function env(db: MemoryD1, overrides: Partial<Env> = {}): Env {
   return {
-    DB: db as unknown as D1Database,
+    DB: db.asDatabase(),
     SESSION_SECRET: SECRET,
     OWNER_TOKEN: OWNER,
     ADMIN_TOKEN: ADMIN,
@@ -304,7 +138,7 @@ test("API token hash roundtrip and pg_ prefix", async () => {
 });
 
 test("TC12.1 valid API token lists the bound mailbox, lists/reads messages, sends; create is admin-only", async () => {
-  const db = new MemoryD1();
+  const db = seededDb();
   const token = await mint(db);
   const testEnv = env(db);
 
@@ -378,7 +212,7 @@ test("TC12.1 valid API token lists the bound mailbox, lists/reads messages, send
 });
 
 test("TC12.2 missing or invalid token is 401", async () => {
-  const db = new MemoryD1();
+  const db = seededDb();
   const testEnv = env(db);
 
   const missing = await rest(new Request("http://127.0.0.1:8787/api/v1/mailboxes"), testEnv);
@@ -406,7 +240,7 @@ test("TC12.2 missing or invalid token is 401", async () => {
 });
 
 test("TC12.3 mailbox-scoped token cannot read another mailbox", async () => {
-  const db = new MemoryD1();
+  const db = seededDb();
   const token = await mint(db, MAILBOX_A.id);
   const testEnv = env(db);
 
@@ -444,7 +278,7 @@ test("TC12.3 mailbox-scoped token cannot read another mailbox", async () => {
 });
 
 test("TC12.4 Turnstile public signup rejects missing/failed challenge and allows success", async () => {
-  const db = new MemoryD1();
+  const db = seededDb();
   const closed = await rest(
     new Request("http://127.0.0.1:8787/api/v1/public/signup", {
       method: "POST",
@@ -529,7 +363,7 @@ test("TC12.4 Turnstile public signup rejects missing/failed challenge and allows
 });
 
 test("TC12.5 over rate is 429 and oversize body is 413 / 400", async () => {
-  const db = new MemoryD1();
+  const db = seededDb();
   const token = await mint(db);
   const limitedEnv = env(db, { REST_RATE_LIMIT_MAX: "2" });
 
@@ -575,7 +409,7 @@ test("TC12.5 over rate is 429 and oversize body is 413 / 400", async () => {
 });
 
 test("owner session mints and revokes a mailbox token", async () => {
-  const db = new MemoryD1();
+  const db = seededDb();
   const cookie = `${OWNER_SESSION_COOKIE}=${await signOwnerSession(SECRET, {
     mailboxId: MAILBOX_A.id,
     address: MAILBOX_A.address,
@@ -638,7 +472,7 @@ test("owner session mints and revokes a mailbox token", async () => {
 });
 
 test("admin bearer mints a token for a mailbox", async () => {
-  const db = new MemoryD1();
+  const db = seededDb();
   const response = await rest(
     new Request("http://127.0.0.1:8787/admin/tokens", {
       method: "POST",
@@ -658,7 +492,7 @@ test("admin bearer mints a token for a mailbox", async () => {
 });
 
 test("cookie owner /api stays on the session path (no token regression)", async () => {
-  const db = new MemoryD1();
+  const db = seededDb();
   const testEnv = env(db);
   const unauth = await requireOwner(new Request("http://127.0.0.1:8787/api/mailboxes"), testEnv);
   assert.equal(unauth.ok, false);

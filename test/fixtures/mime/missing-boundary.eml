@@ -1,0 +1,11 @@
+From: sender@example.com
+To: inbox@example.test
+Subject: missing boundary
+Date: Sat, 19 Sep 2026 12:00:00 +0000
+Message-ID: <missing-boundary@example.test>
+MIME-Version: 1.0
+Content-Type: multipart/mixed
+
+This part has no boundary parameter.
+It is not a real attachment list.
+fallback body here
