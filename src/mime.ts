@@ -92,6 +92,16 @@ function textFromPart(headers: string, body: string, contentType: string): strin
       }
       const { headers: partHeaders, body: partBody } = splitMime(trimmed);
       const partType = headerValue(partHeaders, "content-type") ?? "text/plain";
+      if (/multipart\//i.test(partType)) {
+        const nested = textFromPart(partHeaders, partBody, partType);
+        if (nested) {
+          return nested;
+        }
+        continue;
+      }
+      if (isAttachmentPart(partHeaders, partType)) {
+        continue;
+      }
       if (/text\/plain/i.test(partType)) {
         const text = decodePartText(partHeaders, partBody, partType).trim();
         if (text) {
@@ -241,17 +251,27 @@ function filenameFrom(disposition: string | null, contentType: string): string {
     mimeParam(disposition, "filename") ??
     mimeParam(contentType, "name") ??
     "attachment";
-  const cleaned = raw.replace(/[\r\n]+/g, " ").trim();
-  return cleaned.length > 0 ? cleaned.slice(0, 200) : "attachment";
+  return sanitizeAttachmentFilename(raw);
+}
+
+/** Basename only — strip path traversal and control chars (R2 key also uses safeKeyName). */
+export function sanitizeAttachmentFilename(raw: string): string {
+  const cleaned = raw.replace(/[\r\n\0]+/g, " ").trim();
+  const base = cleaned.replace(/^.*[/\\]/, "");
+  if (!base || base === "." || base === "..") {
+    return "attachment";
+  }
+  return base.slice(0, 200);
 }
 
 function mimeParam(header: string | null, name: string): string | null {
   if (!header) {
     return null;
   }
-  const starred = new RegExp(`${escapeRegExp(name)}\\*\\s*=\\s*([^;]+)`, "i");
+  const rfc2231 = name.endsWith("*") ? name : `${name}*`;
+  const starred = new RegExp(`${escapeRegExp(rfc2231)}\\s*=\\s*([^;]+)`, "i");
   const encoded = header.match(starred);
-  if (encoded && name.endsWith("*")) {
+  if (encoded) {
     let value = encoded[1].trim().replace(/^"(.*)"$/, "$1");
     const parts = value.split("''");
     const data = parts.length === 2 ? parts[1] : value;
@@ -260,6 +280,9 @@ function mimeParam(header: string | null, name: string): string | null {
     } catch {
       return data;
     }
+  }
+  if (name.endsWith("*")) {
+    return null;
   }
   const simple = new RegExp(`${escapeRegExp(name)}\\s*=\\s*("(?:[^"\\\\]|\\\\.)*"|[^;\\s]+)`, "i");
   const match = header.match(simple);

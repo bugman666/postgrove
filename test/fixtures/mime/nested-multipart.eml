@@ -1,0 +1,30 @@
+From: sender@example.com
+To: inbox@example.test
+Subject: nested mixed
+Date: Sat, 19 Sep 2026 12:00:00 +0000
+Message-ID: <nested-multipart@example.test>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="OUTER"
+
+--OUTER
+Content-Type: multipart/alternative; boundary="INNER"
+
+--INNER
+Content-Type: text/plain; charset=utf-8
+
+Visible nested plain text.
+
+--INNER
+Content-Type: text/html; charset=utf-8
+
+<p>HTML fallback that should lose to plain.</p>
+
+--INNER--
+--OUTER
+Content-Type: text/plain; name=nested-note.txt
+Content-Disposition: attachment; filename="nested-note.txt"
+Content-Transfer-Encoding: base64
+
+aGVsbG8gbmVzdA==
+
+--OUTER--
