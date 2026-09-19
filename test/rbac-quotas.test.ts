@@ -113,6 +113,7 @@ class MemoryStatement {
         "users",
         "inbound_hooks",
         "inbound_deliveries",
+        "dev_inboxes",
       ].map((name) => ({ name }));
     }
     if (sql.includes("from users")) {

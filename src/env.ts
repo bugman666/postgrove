@@ -39,6 +39,16 @@ export interface Env {
    * (e.g. http://127.0.0.1). Passed to validateSafeUrl as allowPrivate.
    */
   ALLOW_PRIVATE_WEBHOOKS?: string;
+  /** Own mail domain for ephemeral dev inboxes (optional; else existing mailbox domains). */
+  MAIL_DOMAIN?: string;
+  /** Max open ephemeral inboxes per token mailbox / admin (0 = unlimited, default 8). */
+  DEV_INBOX_QUOTA?: string;
+  /** Default ephemeral inbox TTL in seconds (default 900). */
+  DEV_INBOX_TTL_SECONDS?: string;
+  /** Max ephemeral inbox TTL in seconds (default 3600). */
+  DEV_INBOX_TTL_MAX_SECONDS?: string;
+  /** Max wait / long-poll duration in ms (default 20000). Never hangs past this. */
+  DEV_WAIT_MAX_MS?: string;
   /** Public signup attempts per window (default 5). */
   SIGNUP_RATE_LIMIT_MAX?: string;
   /** Public signup window in ms (default 600000). */
