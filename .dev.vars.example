@@ -82,6 +82,15 @@ ATTACHMENT_MAX_COUNT=10
 # SIGNUP_RATE_LIMIT_WINDOW_MS=600000
 # REST_BODY_MAX_BYTES=256000
 #
+# Per-token daily quotas (D1). 0 = unlimited. Applied as the mint default
+# when the request does not set quota_requests_daily / quota_send_daily.
+# Over limit → 429 quota_api / quota_send.
+# REST_QUOTA_REQUESTS_DAILY=0
+# REST_QUOTA_SEND_DAILY=0
+#
+# Plus-tag: mail to user+tag@the-mailbox-domain lands in user@domain.
+# Settings / POST /api/v1/aliases can list generated aliases (own domain only).
+#
 # Inbound webhooks / forward (#11). Default: https only; validateSafeUrl on
 # save, fetch, and each redirect. Set to 1 for local http://127.0.0.1 hooks.
 # ALLOW_PRIVATE_WEBHOOKS=0

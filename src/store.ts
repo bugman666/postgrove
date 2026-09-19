@@ -252,10 +252,11 @@ export async function listInboxMessages(
     const fromIdx = binds.length + 1;
     const subjectIdx = binds.length + 2;
     const bodyIdx = binds.length + 3;
+    const toIdx = binds.length + 4;
     clauses.push(
-      `(envelope_from LIKE ?${fromIdx} ESCAPE '\\' OR IFNULL(subject, '') LIKE ?${subjectIdx} ESCAPE '\\' OR IFNULL(body_text, '') LIKE ?${bodyIdx} ESCAPE '\\')`,
+      `(envelope_from LIKE ?${fromIdx} ESCAPE '\\' OR IFNULL(subject, '') LIKE ?${subjectIdx} ESCAPE '\\' OR IFNULL(body_text, '') LIKE ?${bodyIdx} ESCAPE '\\' OR IFNULL(envelope_to, '') LIKE ?${toIdx} ESCAPE '\\')`,
     );
-    binds.push(pattern, pattern, pattern);
+    binds.push(pattern, pattern, pattern, pattern);
   }
 
   const rows = await env.DB.prepare(

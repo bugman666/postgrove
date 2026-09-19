@@ -187,6 +187,9 @@ class MemoryStatement {
         label: binds[4],
         created_at: binds[5],
         revoked_at: null,
+        kind: binds[6] ?? "mailbox",
+        quota_requests_daily: binds[7] ?? 0,
+        quota_send_daily: binds[8] ?? 0,
       });
       return 1;
     }

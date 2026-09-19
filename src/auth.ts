@@ -1,3 +1,4 @@
+import { findApiTokenByHash, hashApiToken, looksLikeApiToken } from "./api-tokens.ts";
 import type { Env } from "./env";
 import { findUserByMailboxToken, getUser, listUserMailboxIds } from "./users.ts";
 
@@ -185,6 +186,24 @@ export async function requireAdmin(
 
   const provided = bearerToken(request.headers.get("authorization"));
   if (provided) {
+    if (looksLikeApiToken(provided)) {
+      try {
+        const row = await findApiTokenByHash(env, await hashApiToken(provided));
+        if (row && !row.revoked_at && row.kind === "admin") {
+          return { ok: true, principal: { kind: "admin", source: "bearer" } };
+        }
+      } catch {
+        // Missing api_tokens columns: fall through to 401.
+      }
+      return {
+        ok: false,
+        response: jsonError(
+          401,
+          "unauthorized",
+          "Invalid or revoked admin API token. Mailbox-scoped pg_ keys cannot open admin routes.",
+        ),
+      };
+    }
     if (!timingSafeEqualString(provided, configured.token)) {
       return {
         ok: false,

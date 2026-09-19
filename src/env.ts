@@ -53,6 +53,16 @@ export interface Env {
   SIGNUP_RATE_LIMIT_MAX?: string;
   /** Public signup window in ms (default 600000). */
   SIGNUP_RATE_LIMIT_WINDOW_MS?: string;
+  /**
+   * Default daily REST request quota applied when minting a token that
+   * does not set quota_requests_daily. 0 = unlimited (same as users.quota_*).
+   */
+  REST_QUOTA_REQUESTS_DAILY?: string;
+  /**
+   * Default daily REST send quota applied when minting a token that
+   * does not set quota_send_daily. 0 = unlimited.
+   */
+  REST_QUOTA_SEND_DAILY?: string;
 }
 
 /** Envelope fields used by the Email Routing stub. */

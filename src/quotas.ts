@@ -3,7 +3,7 @@ import { formatBytes } from "./attachment-limits.ts";
 import { t, type Locale } from "./i18n.ts";
 import type { UserRecord } from "./users.ts";
 
-export type QuotaKind = "quota_addresses" | "quota_storage" | "quota_send";
+export type QuotaKind = "quota_addresses" | "quota_storage" | "quota_send" | "quota_api";
 
 export interface QuotaError {
   error: QuotaKind;
@@ -183,6 +183,107 @@ export async function sendCountForDay(env: Env, userId: string, day: string): Pr
     .bind(userId, day)
     .first<{ count: number }>();
   return Number(row?.count ?? 0);
+}
+
+export async function checkTokenRequestQuota(
+  env: Env,
+  tokenId: string,
+  limit: number,
+  now = Date.now(),
+  locale: Locale = "zh",
+): Promise<QuotaError | null> {
+  if (isUnlimited(limit)) {
+    return null;
+  }
+  const day = utcDay(now);
+  const used = await tokenRequestCountForDay(env, tokenId, day);
+  if (used >= limit) {
+    return {
+      error: "quota_api",
+      hint: apiHint(used, limit, day, locale),
+      used,
+      limit,
+    };
+  }
+  return null;
+}
+
+export async function incrementTokenRequestUsage(
+  env: Env,
+  tokenId: string,
+  now = Date.now(),
+): Promise<number> {
+  const day = utcDay(now);
+  await env.DB.prepare(
+    `INSERT INTO api_token_usage (token_id, day, request_count, send_count) VALUES (?1, ?2, 1, 0)
+     ON CONFLICT(token_id, day) DO UPDATE SET request_count = request_count + 1`,
+  )
+    .bind(tokenId, day)
+    .run();
+  return tokenRequestCountForDay(env, tokenId, day);
+}
+
+export async function checkTokenSendQuota(
+  env: Env,
+  tokenId: string,
+  limit: number,
+  now = Date.now(),
+  locale: Locale = "zh",
+): Promise<QuotaError | null> {
+  if (isUnlimited(limit)) {
+    return null;
+  }
+  const day = utcDay(now);
+  const used = await tokenSendCountForDay(env, tokenId, day);
+  if (used >= limit) {
+    return {
+      error: "quota_send",
+      hint: sendHint(used, limit, day, locale),
+      used,
+      limit,
+    };
+  }
+  return null;
+}
+
+export async function incrementTokenSendUsage(
+  env: Env,
+  tokenId: string,
+  now = Date.now(),
+): Promise<number> {
+  const day = utcDay(now);
+  await env.DB.prepare(
+    `INSERT INTO api_token_usage (token_id, day, request_count, send_count) VALUES (?1, ?2, 0, 1)
+     ON CONFLICT(token_id, day) DO UPDATE SET send_count = send_count + 1`,
+  )
+    .bind(tokenId, day)
+    .run();
+  return tokenSendCountForDay(env, tokenId, day);
+}
+
+export async function tokenRequestCountForDay(env: Env, tokenId: string, day: string): Promise<number> {
+  const row = await env.DB.prepare(
+    `SELECT request_count FROM api_token_usage WHERE token_id = ?1 AND day = ?2`,
+  )
+    .bind(tokenId, day)
+    .first<{ request_count: number }>();
+  return Number(row?.request_count ?? 0);
+}
+
+export async function tokenSendCountForDay(env: Env, tokenId: string, day: string): Promise<number> {
+  const row = await env.DB.prepare(
+    `SELECT send_count FROM api_token_usage WHERE token_id = ?1 AND day = ?2`,
+  )
+    .bind(tokenId, day)
+    .first<{ send_count: number }>();
+  return Number(row?.send_count ?? 0);
+}
+
+function apiHint(used: number, limit: number, day: string, locale: Locale = "zh"): string {
+  if (locale === "en") {
+    return t("en", "quota.api-used", { used, limit, day });
+  }
+  return `今日 API 请求配额已用完（${used} / ${limit}，UTC ${day}）。明天零点（UTC）重置，或为这把钥匙提高日请求上限。`;
 }
 
 function addressHint(used: number, limit: number, locale: Locale = "zh"): string {

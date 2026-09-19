@@ -57,7 +57,7 @@ See Issues under milestones `P0-MVP` … `P3-dev-api`. Longer write-ups: [produc
 
 ## Status
 
-P0 inbox on the Worker: list / read / delete against D1, inbound attachments in R2, plus compose/send behind the owner session. Search (LIKE on from / subject / body), unread toggle with a nav count, and star/flag are in. System folders (inbox / sent / drafts / trash / spam) use the existing `messages.folder` column; drafts save and resume on `/compose`. Outbound is pluggable (`stub` / `resend` / `http`). Reply / reply-all / forward prefill compose and send through the same adapters (In-Reply-To / References on reply). The inbox list groups related mail into basic threads (count on the row; open expands in time order). Mailbox-scoped REST tokens live under `/api/v1` (hash at rest, `Authorization: Bearer pg_…`). Developer ephemeral inboxes (`/api/v1/dev/inboxes`) mint a short-lived address on **this deployment's own domain**, then wait / extract OTP or link / close. Public signup is **off** unless Turnstile is configured. Small-team members (`users` + `user_mailboxes`) have address / storage / daily-send quotas; `/admin` is a forest-token 值守台 (ADMIN_TOKEN or admin role) with a light overview (users / today's mail / attachment MB) and site title / logo / accent (`--pg-color-brand` only). The UI follows `Accept-Language` (en / zh) and can be forced from Settings. Inbound webhooks POST a signed JSON payload; optional forward goes to a chat-bot URL or an external mailbox. Delivery failures stay on `/settings` and `/admin` (never swallowed). Outbound send attachments are a later follow-up. Light-editorial brand art (paper + forest green) lives in [`docs/assets/`](docs/assets/).
+P0 inbox on the Worker: list / read / delete against D1, inbound attachments in R2, plus compose/send behind the owner session. Search (LIKE on from / To / subject / body), unread toggle with a nav count, and star/flag are in. System folders (inbox / sent / drafts / trash / spam) use the existing `messages.folder` column; drafts save and resume on `/compose`. Outbound is pluggable (`stub` / `resend` / `http`). Reply / reply-all / forward prefill compose and send through the same adapters (In-Reply-To / References on reply). The inbox list groups related mail into basic threads (count on the row; open expands in time order). Mailbox-scoped REST tokens live under `/api/v1` (hash at rest, `Authorization: Bearer pg_…`). Tokens are **mailbox** or **admin** kind; mailbox keys stay on one address, admin keys (or `ADMIN_TOKEN`) may act across mailboxes. Optional per-token daily request / send quotas fail loud (`quota_api` / `quota_send`). Plus-tag subaddressing (`user+tag@your-domain`) lands in the primary mailbox; Settings can generate/list aliases on that domain only. Developer ephemeral inboxes (`/api/v1/dev/inboxes`) mint a short-lived address on **this deployment's own domain**, then wait / extract OTP or link / close. Public signup is **off** unless Turnstile is configured. Small-team members (`users` + `user_mailboxes`) have address / storage / daily-send quotas; `/admin` is a forest-token 值守台 (ADMIN_TOKEN or admin role) with a light overview (users / today's mail / attachment MB) and site title / logo / accent (`--pg-color-brand` only). The UI follows `Accept-Language` (en / zh) and can be forced from Settings. Inbound webhooks POST a signed JSON payload; optional forward goes to a chat-bot URL or an external mailbox. Delivery failures stay on `/settings` and `/admin` (never swallowed). Outbound send attachments are a later follow-up. Light-editorial brand art (paper + forest green) lives in [`docs/assets/`](docs/assets/).
 
 ## Local development
 
@@ -92,7 +92,7 @@ Direct links (same origin as `wrangler dev`):
 - Inbox with mail: [http://127.0.0.1:8787/box/11111111-1111-4111-8111-111111111111](http://127.0.0.1:8787/box/11111111-1111-4111-8111-111111111111)
 - Empty box: [http://127.0.0.1:8787/box/11111111-1111-4111-8111-111111111112](http://127.0.0.1:8787/box/11111111-1111-4111-8111-111111111112)
 
-Open a row to read the body. Inbox rows are **threads**: a badge shows how many messages share the conversation. Opening a thread (`/box/:id/t/:threadId`) expands members in `received_at` order. An unread inbox row becomes read; opening a multi-message thread marks every inbox member read. **标为未读** on the reading pane flips one message back and the nav unread count updates. **☆ / ★** stars persist in D1. The list search box matches from, subject, and body with SQL `LIKE` (not FTS5). Filter chips: 全部 / 未读 / 星标. Sidebar folders: 收件箱 / 已发送 / 草稿 / 垃圾箱 / 垃圾邮件. **存草稿** keeps subject and body; opening the draft row restores them. Sending a draft promotes that row to 已发送. Delete moves the row to `trash` (it leaves the current folder and shows under 垃圾箱). **回复** / **全部回复** / **转发** open `/compose` with the original message prefilled. Reply sets `To` to the sender, `Re:` on the subject, and `In-Reply-To` / `References` from the stored Message-ID chain. Reply-all puts the original sender plus original To/Cc in To (deduped, minus this mailbox). Forward uses `Fwd:` and quotes the original headers/body; you still pick the new recipient. The seeded 「本地附件种子」row lists `grove-note.txt`; the owner session can download it from `/attachments/33333333-3333-4333-8333-333333333331`. **写信** is a real form (to / cc / subject / body). With `OUTBOUND_PROVIDER=stub` (the example `.dev.vars`) a submit records the attempt in D1, writes a sent message, and does not leave the box. The welcome seed row is already starred so the 星标 filter has something to show.
+Open a row to read the body. Inbox rows are **threads**: a badge shows how many messages share the conversation. Opening a thread (`/box/:id/t/:threadId`) expands members in `received_at` order. An unread inbox row becomes read; opening a multi-message thread marks every inbox member read. **标为未读** on the reading pane flips one message back and the nav unread count updates. **☆ / ★** stars persist in D1. The list search box matches from, To (including `+tag`), subject, and body with SQL `LIKE` (not FTS5). Filter chips: 全部 / 未读 / 星标. Sidebar folders: 收件箱 / 已发送 / 草稿 / 垃圾箱 / 垃圾邮件. **存草稿** keeps subject and body; opening the draft row restores them. Sending a draft promotes that row to 已发送. Delete moves the row to `trash` (it leaves the current folder and shows under 垃圾箱). **回复** / **全部回复** / **转发** open `/compose` with the original message prefilled. Reply sets `To` to the sender, `Re:` on the subject, and `In-Reply-To` / `References` from the stored Message-ID chain. Reply-all puts the original sender plus original To/Cc in To (deduped, minus this mailbox). Forward uses `Fwd:` and quotes the original headers/body; you still pick the new recipient. The seeded 「本地附件种子」row lists `grove-note.txt`; the owner session can download it from `/attachments/33333333-3333-4333-8333-333333333331`. **写信** is a real form (to / cc / subject / body). With `OUTBOUND_PROVIDER=stub` (the example `.dev.vars`) a submit records the attempt in D1, writes a sent message, and does not leave the box. The welcome seed row is already starred so the 星标 filter has something to show.
 
 JSON against the same seeded rows (cookie from `POST /auth/login`):
 
@@ -165,7 +165,7 @@ aGVsbG8K
 
 ### Search, unread, and star
 
-Search uses **SQL `LIKE`** on `envelope_from`, `subject`, and `body_text` (case-insensitive for ASCII). `%` / `_` in the query are escaped. This is not D1 FTS5 — fine for a single-operator inbox; FTS can come later if the corpus grows.
+Search uses **SQL `LIKE`** on `envelope_from`, `envelope_to`, `subject`, and `body_text` (case-insensitive for ASCII). `%` / `_` in the query are escaped. `envelope_to` is how a `+tag` stays findable. This is not D1 FTS5 — fine for a single-operator inbox; FTS can come later if the corpus grows.
 
 `GET /api/search` and `GET /api/mailboxes/:id/messages` accept `q` and `filter=unread|starred`. Both call `requireOwner`. The JSON includes `engine: "like"` and `unread_count`.
 
@@ -424,7 +424,14 @@ Quota errors are loud: `quota_addresses` **409**, `quota_storage` **409** (inbou
 
 Token API for automating address and mail ops. Cookie owner `/api/*` (inbox UI JSON) is unchanged and still uses `requireOwner`.
 
-**Tokens are mailbox-scoped.** They bind to `mailbox_id`. A token hashed at rest (`SHA-256`) looks like `pg_…`. Only the hash is stored. The plaintext secret is shown **once** at mint time. Member sessions (`users` + `user_mailboxes`) are a separate cookie path; a `pg_` token does not impersonate a member role.
+**Two key kinds.** A token hashed at rest (`SHA-256`) looks like `pg_…`. Only the hash is stored. The plaintext secret is shown **once** at mint time. Member sessions (`users` + `user_mailboxes`) are a separate cookie path; a `pg_` token does not impersonate a member role.
+
+| Kind | How you get it | What it can do |
+|------|----------------|----------------|
+| **mailbox** (default) | Owner `POST /api/tokens`, token `POST /api/v1/tokens`, or admin mint with `kind=mailbox` | REST for **that** mailbox only. Cannot create addresses, cannot mint admin keys, cannot change another mailbox's aliases/keys. |
+| **admin** | Env `ADMIN_TOKEN`, or `POST /admin/tokens` `{ "kind": "admin", "mailbox_id" }` | Same as today's admin bearer on `/api/v1` and `/admin/*`. May list/create aliases and mint/revoke keys across mailboxes. A mailbox `pg_` key cannot mint this kind (**403**). |
+
+`mailbox_id` on an admin-kind `pg_` token is the mint home (the row still needs a mailbox). Authorization follows `kind`, not that home address.
 
 Mint (owner session, bound to the logged-in mailbox):
 
@@ -440,7 +447,7 @@ Or admin (any mailbox):
 curl -sS -X POST http://127.0.0.1:8787/admin/tokens \
   -H 'Authorization: Bearer change-me-local-admin-token' \
   -H 'content-type: application/json' \
-  -d '{"mailbox_id":"11111111-1111-4111-8111-111111111111","label":"local-ci"}'
+  -d '{"mailbox_id":"11111111-1111-4111-8111-111111111111","label":"local-ci","kind":"mailbox","quota_requests_daily":10000,"quota_send_daily":50}'
 ```
 
 Expect `201` and `token.token` (`pg_…`). Store it; `GET /api/tokens` / `GET /admin/tokens?mailbox_id=…` only show `prefix` + label. Revoke with `POST /api/tokens/:id/revoke` (owner) or `POST /admin/tokens/:id/revoke` (admin).
@@ -464,7 +471,28 @@ curl -sS -H "Authorization: Bearer $PG_TOKEN" \
   -d '{"to":"neighbor@example.test","subject":"hello","text":"from token REST"}'
 ```
 
-Missing or invalid bearer → **401**. Using a token on another mailbox's messages or send → **403**. `POST /api/v1/mailboxes` with a `pg_` token is **403** (`forbidden`: create is admin-only). `GET /api/v1` is a public catalog (no secrets). Apply `npm run db:migrate:local` so `api_tokens` exists (`0008_api_tokens.sql`).
+Missing or invalid bearer → **401**. Using a mailbox token on another mailbox's messages, send, aliases, or keys → **403**. `POST /api/v1/mailboxes` with a mailbox `pg_` token is **403** (`forbidden`: create is admin-only). `GET /api/v1` is a public catalog (no secrets). Apply `npm run db:migrate:local` so `api_tokens` and `mailbox_aliases` exist (`0008` + `0013`).
+
+**Aliases (`/api/v1/aliases`).** List/create plus-tag addresses for a mailbox you already own. Domain must match the mailbox primary (cross-domain → **400** `alias_domain_forbidden`). Owner session: `GET|POST /api/aliases`. Token: `GET|POST /api/v1/aliases` and `GET|POST /api/v1/mailboxes/:id/aliases`. Revoke: `POST /api/v1/aliases/:id/revoke` or `POST /api/aliases/:id/revoke`. Settings HTML can generate a `local+<8 hex>@domain` row (XSS-escaped). Cap: **50** aliases per mailbox.
+
+```bash
+curl -sS -H "Authorization: Bearer $PG_TOKEN" \
+  -X POST http://127.0.0.1:8787/api/v1/aliases \
+  -H 'content-type: application/json' \
+  -d '{"generate":true}'
+curl -sS -H "Authorization: Bearer $PG_TOKEN" \
+  http://127.0.0.1:8787/api/v1/aliases
+```
+
+Token key admin (same mailbox, or any mailbox with an admin key):
+
+```bash
+curl -sS -H "Authorization: Bearer $PG_TOKEN" http://127.0.0.1:8787/api/v1/tokens
+curl -sS -H "Authorization: Bearer $PG_TOKEN" \
+  -X POST http://127.0.0.1:8787/api/v1/tokens \
+  -H 'content-type: application/json' \
+  -d '{"label":"ci","quota_requests_daily":1000}'
+```
 
 **Create addresses** is not a token REST capability. Admin: `POST /admin/mailboxes` with `ADMIN_TOKEN`. Owner session (cookie UI/API): `POST /api/mailboxes` `{ "address" }` (still one shared `OWNER_TOKEN` to log in as the new address). Public signup is a separate Turnstile-gated path when enabled.
 
@@ -483,13 +511,16 @@ curl -sS -o /dev/stderr -w '%{http_code}\n' \
 | Surface | Default | Over limit |
 |---------|---------|------------|
 | `POST /auth/login` | 8 / 10 min / IP | **429** + `Retry-After` |
-| `/api/v1/*` (after auth) | **60 / 60s** per token (or admin IP) | **429** + `Retry-After` |
+| `/api/v1/*` (after auth) | **60 / 60s** per token (or admin IP) | **429** `rate_limited` + `Retry-After` |
+| Per-token daily REST requests | **0 = unlimited** (set `quota_requests_daily` at mint, or `REST_QUOTA_REQUESTS_DAILY` as the mint default) | **429** `quota_api` |
+| Per-token daily REST sends | **0 = unlimited** (set `quota_send_daily` at mint, or `REST_QUOTA_SEND_DAILY` as the mint default) | **429** `quota_send` |
 | `POST /api/v1/public/signup` | **5 / 10 min / IP** | **429** + `Retry-After` |
 | JSON body (`REST_BODY_MAX_BYTES`) | **256000** bytes | **413** `payload_too_large` |
 | Outbound `text` / `subject` | 256000 chars / 998 chars (`src/outbound.ts`) | **400** |
 | Inbound attachments | 10 MiB / 10 files | inbound reject (see above) |
+| Aliases per mailbox | **50** | **409** `alias_limit` |
 
-Override REST knobs with `REST_RATE_LIMIT_MAX`, `REST_RATE_LIMIT_WINDOW_MS`, `SIGNUP_RATE_LIMIT_MAX`, `SIGNUP_RATE_LIMIT_WINDOW_MS`, `REST_BODY_MAX_BYTES` in `.dev.vars` / Worker vars. A new isolate starts a fresh window.
+Override REST knobs with `REST_RATE_LIMIT_MAX`, `REST_RATE_LIMIT_WINDOW_MS`, `SIGNUP_RATE_LIMIT_MAX`, `SIGNUP_RATE_LIMIT_WINDOW_MS`, `REST_BODY_MAX_BYTES`, `REST_QUOTA_REQUESTS_DAILY`, `REST_QUOTA_SEND_DAILY` in `.dev.vars` / Worker vars. A new isolate starts a fresh rate-limit window. Daily quotas live in D1 (`api_token_usage`) and reset at midnight UTC.
 
 ### Dev inbox API (own domain only)
 
@@ -563,11 +594,30 @@ Hello from a local inbound test.
 '
 ```
 
-Create the address first, then receive. The stub rejects unknown and disabled recipients (no catch-all, no anonymous boxes). After `npm run db:seed:local`, `inbox@example.test` is available. Check Wrangler logs for `inbound stub: stored`. Inspect rows with:
+Create the address first, then receive. The stub rejects unknown and disabled recipients (no catch-all, no anonymous boxes).
+
+**Plus-tag / RFC 5233 subaddressing.** Mail to `inbox+promo@example.test` is delivered to the `inbox@example.test` mailbox. `envelope_to` keeps the original recipient (with `+tag`) so inbox search can find the tag. Explicit aliases (Settings or `POST /api/v1/aliases`) must use that mailbox's own domain.
+
+```bash
+curl --request POST 'http://127.0.0.1:8787/cdn-cgi/local/email' \
+  --url-query 'from=sender@example.com' \
+  --url-query 'to=inbox+promo@example.test' \
+  --data-raw 'From: sender@example.com
+To: inbox+promo@example.test
+Subject: plus-tag local stub
+Date: Sat, 19 Sep 2026 12:00:00 +0000
+Message-ID: <local-plus-1@example.test>
+Content-Type: text/plain; charset=utf-8
+
+Search for promo to find this row.
+'
+```
+
+After `npm run db:seed:local`, `inbox@example.test` is available. Check Wrangler logs for `inbound stub: stored`. Inspect rows with:
 
 ```bash
 npx wrangler d1 execute postgrove --local --command \
-  "SELECT address FROM mailboxes; SELECT subject, envelope_from, folder, is_read FROM messages;"
+  "SELECT address FROM mailboxes; SELECT subject, envelope_from, envelope_to, folder, is_read FROM messages;"
 ```
 
 ## Remote placeholders
@@ -601,25 +651,26 @@ Then, in the Cloudflare dashboard, enable Email Routing for your domain and add 
 |------|------|
 | `src/index.ts` | Worker `fetch` + `email` handlers |
 | `src/auth.ts` | Owner session + member session + admin bearer/cookie; `requireOwner` / `requireAdmin` |
-| `src/rest.ts` | Token REST `/api/v1` + public signup + admin mint + `/api/v1/dev/inboxes` |
+| `src/rest.ts` | Token REST `/api/v1` + aliases + public signup + admin mint + `/api/v1/dev/inboxes` |
 | `src/dev-inbox.ts` | Ephemeral own-domain inbox create / wait / close |
 | `src/extract.ts` | OTP / link extract helpers (documented rules, fail loud) |
-| `src/api-tokens.ts` | Opaque `pg_…` tokens (hash at rest, mailbox-scoped) |
+| `src/api-tokens.ts` | Opaque `pg_…` tokens (hash at rest; mailbox or admin kind) |
+| `src/aliases.ts` | +tag resolve, own-domain alias create/list, Settings panel HTML |
 | `src/turnstile.ts` | Cloudflare siteverify (public signup only when configured) |
 | `src/rate-limit.ts` | In-memory limiter for token API + signup |
 | `src/users.ts` | Members, token hash, mailbox bindings |
-| `src/quotas.ts` | Address / storage / daily-send checks (`0` = unlimited) |
+| `src/quotas.ts` | Address / storage / daily-send / per-token API checks (`0` = unlimited) |
 | `src/admin.ts` | `/admin` 值守台 + JSON users / mailboxes / audit / inbound deliveries / stats / branding |
 | `src/analytics.ts` | Light overview counts (users, today's mail, attachment MB) |
 | `src/i18n.ts` | en / zh copy; `Accept-Language` + settings cookie |
 | `src/branding.ts` | Site title / logo URL / accent; `validateSafeUrl` on logo save and fetch |
 | `src/view.ts` | Shared shell (locale + branding) for HTML |
 | `src/health.ts` | `GET /healthz` |
-| `src/inbound.ts` | Email Routing stub persist + attachment limits |
+| `src/inbound.ts` | Email Routing stub persist + +tag / alias resolve + attachment limits |
 | `src/attachment-limits.ts` | Size / count caps and human-readable over-limit errors |
 | `src/attachments.ts` | R2 store / owner download / read-view links |
 | `src/mime.ts` | Plain-text body extract + inbound MIME attachments |
-| `src/api.ts` | JSON list / read / delete / send / search / star / threads |
+| `src/api.ts` | JSON list / read / delete / send / search / star / threads / aliases |
 | `src/ui.ts` | Inbox HTML + compose / reply / forward form |
 | `src/reply.ts` | Reply / reply-all / forward prefill + header helpers |
 | `src/threads.ts` | Inbox thread grouping (citation, then subject fallback) |
@@ -638,8 +689,9 @@ Then, in the Cloudflare dashboard, enable Email Routing for your domain and add 
 | `migrations/0008_api_tokens.sql` | Mailbox-scoped API tokens (hash at rest) |
 | `migrations/0009_users_rbac_quotas.sql` | `users`, `user_mailboxes`, `send_usage` |
 | `migrations/0010_inbound_hooks.sql` | `inbound_hooks` + `inbound_deliveries` |
-| `migrations/0011_site_settings.sql` | Light site title / logo / accent |
+| `migrations/0011_site_settings.sql` | Site title / logo / accent |
 | `migrations/0012_dev_inboxes.sql` | Ephemeral developer inboxes (own domain; not +tag aliases) |
+| `migrations/0013_aliases_api_key_quotas.sql` | `mailbox_aliases` + token kind/quotas + `api_token_usage` |
 | `scripts/seed-local.sql` | Local sample mailboxes + messages (not for remote) |
 | `scripts/seed-grove-note.txt` | Local sample attachment bytes |
 | `wrangler.jsonc` | Worker + D1 + R2 bindings (placeholders) |
