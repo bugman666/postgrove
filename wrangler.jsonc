@@ -23,6 +23,17 @@
       "preview_bucket_name": "postgrove-attachments-local"
     }
   ],
+  // Shared login / REST / signup counters. Replace id after:
+  //   npx wrangler kv namespace create RATE_LIMIT
+  // Local `wrangler dev` uses preview_id (or `npx wrangler kv namespace create RATE_LIMIT --preview`).
+  // If the binding is missing, the Worker keeps the in-memory Map.
+  "kv_namespaces": [
+    {
+      "binding": "RATE_LIMIT",
+      "id": "00000000-0000-0000-0000-000000000000",
+      "preview_id": "postgrove-rate-limit-local"
+    }
+  ],
   "vars": {
     "ATTACHMENT_MAX_BYTES": "10485760",
     "ATTACHMENT_MAX_COUNT": "10"

@@ -39,10 +39,11 @@
 #                     request. Rotate SESSION_SECRET to drop an issued cookie.
 #   REST pg_ token  — mint a new hash row; delete the old one.
 #
-# POST /auth/login is limited to 8 attempts per 10 minutes per IP (in-memory,
-# per Worker isolate). A 429 includes a human-readable hint and Retry-After.
-# REST / signup use the same per-isolate counters. A shared Durable Object
-# limiter is a follow-up if you run many isolates — not required for v0.1.
+# POST /auth/login is limited to 8 attempts per 10 minutes per IP. A 429
+# includes a human-readable hint and Retry-After. REST / signup use the same
+# limiter (`src/rate-limit.ts`). Bind Workers KV as RATE_LIMIT in wrangler.jsonc
+# so isolates share the window (`npx wrangler kv namespace create RATE_LIMIT`).
+# Without the binding, counters stay in-memory per isolate (local / tests).
 
 # HMAC secret for the owner session cookie (min 16 characters). Rotate to revoke sessions.
 SESSION_SECRET=change-me-local-session-secret
@@ -95,7 +96,8 @@ ATTACHMENT_MAX_COUNT=10
 # TURNSTILE_SITE_KEY=your-turnstile-site-key
 # TURNSTILE_SECRET_KEY=your-turnstile-secret-key
 #
-# Defaults (in-memory, per isolate). Over limit → 429 / 413.
+# Defaults. Shared across isolates when RATE_LIMIT KV is bound; otherwise
+# in-memory per isolate. Over limit → 429 / 413.
 # REST_RATE_LIMIT_MAX=60
 # REST_RATE_LIMIT_WINDOW_MS=60000
 # SIGNUP_RATE_LIMIT_MAX=5

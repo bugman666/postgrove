@@ -388,7 +388,7 @@ Sign out (clears the cookie on the client; sessions are stateless HMAC tokens):
 curl -i -c /tmp/pg-cookies -X POST http://127.0.0.1:8787/auth/logout
 ```
 
-**Login rate limit.** `POST /auth/login` allows **8 attempts per 10 minutes per IP** (`CF-Connecting-IP`, else the first `X-Forwarded-For` hop). Over the limit returns **429** with `Retry-After` and a hint such as “Too many login attempts from this network…”. Counters live in Worker memory **per isolate**, so a new isolate starts a fresh window. That residual is accepted for a single-operator box. A shared Durable Object / KV limiter is a follow-up if you run many isolates; it is not required for v0.1.
+**Login rate limit.** `POST /auth/login` allows **8 attempts per 10 minutes per IP** (`CF-Connecting-IP`, else the first `X-Forwarded-For` hop). Over the limit returns **429** with `Retry-After` and a hint such as “Too many login attempts from this network…”. When the `RATE_LIMIT` KV namespace is bound, login / REST / signup counters are **shared across isolates** (fixed-window get-then-put; a concurrent race can let a couple of extra requests through). Without the binding, counters stay in Worker memory **per isolate**. Create the namespace with `npx wrangler kv namespace create RATE_LIMIT` and put the id in `wrangler.jsonc`.
 
 **Rotate / revoke.** Logout only deletes the cookie in that browser. Tokens are HMAC-signed and are not stored on the server, so they stay valid until expiry (7 days) if someone copied the cookie.
 
@@ -530,7 +530,7 @@ curl -sS -o /dev/stderr -w '%{http_code}\n' \
   -d '{"address":"guest@example.test","turnstile_token":"xx"}'
 ```
 
-**Rate and size limits** (documented defaults; in-memory per Worker isolate, same style as login):
+**Rate and size limits** (documented defaults; shared KV when `RATE_LIMIT` is bound, otherwise in-memory per isolate):
 
 | Surface | Default | Over limit |
 |---------|---------|------------|
@@ -544,7 +544,7 @@ curl -sS -o /dev/stderr -w '%{http_code}\n' \
 | Inbound attachments | 10 MiB / 10 files | inbound reject (see above) |
 | Aliases per mailbox | **50** | **409** `alias_limit` |
 
-Override REST knobs with `REST_RATE_LIMIT_MAX`, `REST_RATE_LIMIT_WINDOW_MS`, `SIGNUP_RATE_LIMIT_MAX`, `SIGNUP_RATE_LIMIT_WINDOW_MS`, `REST_BODY_MAX_BYTES`, `REST_QUOTA_REQUESTS_DAILY`, `REST_QUOTA_SEND_DAILY` in `.dev.vars` / Worker vars. Login, REST, and signup counters are **per isolate** — a new isolate starts a fresh window (the same residual as login). Daily quotas live in D1 (`api_token_usage`) and reset at midnight UTC. A shared Durable Object limiter is documented as a follow-up, not part of this cut.
+Override REST knobs with `REST_RATE_LIMIT_MAX`, `REST_RATE_LIMIT_WINDOW_MS`, `SIGNUP_RATE_LIMIT_MAX`, `SIGNUP_RATE_LIMIT_WINDOW_MS`, `REST_BODY_MAX_BYTES`, `REST_QUOTA_REQUESTS_DAILY`, `REST_QUOTA_SEND_DAILY` in `.dev.vars` / Worker vars. Bind `RATE_LIMIT` (Workers KV) so login / REST / signup windows are shared across isolates; without it the Worker keeps the in-memory Map (local and tests). KV get-then-put is not atomic — a concurrent race can undershoot the count. Daily quotas live in D1 (`api_token_usage`) and reset at midnight UTC.
 
 ### Dev inbox API (own domain only)
 
@@ -646,7 +646,7 @@ npx wrangler d1 execute postgrove --local --command \
 
 ## Remote placeholders
 
-`wrangler.jsonc` ships with a dummy `database_id`. Replace it after creating a real D1 database. Do not commit account tokens, API keys, or filled `.dev.vars`.
+`wrangler.jsonc` ships with dummy D1 / KV ids. Replace them after creating a real D1 database and `RATE_LIMIT` namespace. Do not commit account tokens, API keys, or filled `.dev.vars`.
 
 ```bash
 npx wrangler login
@@ -655,6 +655,9 @@ npx wrangler d1 create postgrove
 npm run db:migrate:remote
 npx wrangler r2 bucket create postgrove-attachments
 # confirm wrangler.jsonc r2_buckets.bucket_name matches
+npx wrangler kv namespace create RATE_LIMIT
+# paste the printed id into wrangler.jsonc kv_namespaces (binding RATE_LIMIT)
+# optional preview namespace: npx wrangler kv namespace create RATE_LIMIT --preview
 npx wrangler secret put SESSION_SECRET
 npx wrangler secret put OWNER_TOKEN   # break-glass only; prefer POST /admin/users
 npx wrangler secret put ADMIN_TOKEN
@@ -682,7 +685,7 @@ Then, in the Cloudflare dashboard, enable Email Routing for your domain and add 
 | `src/api-tokens.ts` | Opaque `pg_…` tokens (hash at rest; mailbox or admin kind) |
 | `src/aliases.ts` | +tag resolve, own-domain alias create/list, Settings panel HTML |
 | `src/turnstile.ts` | Cloudflare siteverify (public signup only when configured) |
-| `src/rate-limit.ts` | In-memory limiter for token API + signup |
+| `src/rate-limit.ts` | Shared KV (or in-memory fallback) limiter for login / token API / signup |
 | `src/users.ts` | Members, token hash, mailbox bindings |
 | `src/quotas.ts` | Address / storage / daily-send / per-token API checks (`0` = unlimited) |
 | `src/admin.ts` | `/admin` 值守台 + JSON users / mailboxes / audit / inbound deliveries / stats / branding |

@@ -2,6 +2,11 @@ export interface Env {
   DB: D1Database;
   /** R2 bucket for inbound attachment bytes. */
   ATTACHMENTS?: R2Bucket;
+  /**
+   * Shared fixed-window counters for login / REST / signup.
+   * Optional: missing binding keeps the in-memory Map (local / tests).
+   */
+  RATE_LIMIT?: KVNamespace;
   /** HMAC secret for owner session cookies. Rotate to revoke all sessions. */
   SESSION_SECRET?: string;
   /**
