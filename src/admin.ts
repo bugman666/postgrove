@@ -5,8 +5,10 @@ import { EMPTY_ART, GROVE_MARK, escapeHtml, formatReceived } from "./html.ts";
 import { checkAddressQuota, userUsage, type UserUsageSnapshot } from "./quotas.ts";
 import {
   createMailbox,
+  getMailbox,
   listMailboxes,
   MailboxInputError,
+  parseMailboxAddress,
   setMailboxStatus,
   type MailboxRecord,
   type MessageRecord,
@@ -140,6 +142,27 @@ async function createAdminUser(request: Request, env: Env): Promise<Response> {
     );
   }
 
+  const mailboxAddress = typeof record.mailbox === "string" ? record.mailbox.trim() : "";
+  if (mailboxAddress) {
+    if (!parseMailboxAddress(mailboxAddress)) {
+      return json(
+        { ok: false, error: "invalid_address", hint: "Address must look like local@domain.tld." },
+        400,
+      );
+    }
+    try {
+      const existing = await getMailbox(env, mailboxAddress);
+      if (existing) {
+        return json(
+          { ok: false, error: "address_taken", hint: "That address is already in this grove." },
+          400,
+        );
+      }
+    } catch (error) {
+      return migrateHint(error);
+    }
+  }
+
   try {
     const created = await createUser(env, {
       login,
@@ -152,22 +175,7 @@ async function createAdminUser(request: Request, env: Env): Promise<Response> {
     });
 
     let mailbox: MailboxRecord | null = null;
-    const mailboxAddress = typeof record.mailbox === "string" ? record.mailbox.trim() : "";
     if (mailboxAddress) {
-      const quota = await checkAddressQuota(env, created.user);
-      if (quota) {
-        return json(
-          {
-            ok: true,
-            user: publicUser(created.user),
-            token: created.token,
-            mailbox: null,
-            warning: quota.hint,
-            error: quota.error,
-          },
-          201,
-        );
-      }
       mailbox = await createMailbox(env, {
         address: mailboxAddress,
         displayName: created.user.display_name,

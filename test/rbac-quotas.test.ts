@@ -732,3 +732,145 @@ test("member can create an address under quota", async () => {
   const body = (await response.json()) as { mailbox: { address: string } };
   assert.equal(body.mailbox.address, "notes@example.test");
 });
+
+test("TC10.2 owner session is 403 on admin APIs and other mailboxes", async () => {
+  const env = testEnv();
+  const token = await signOwnerSession(SECRET, {
+    mailboxId: INBOX.id,
+    address: INBOX.address,
+  });
+  const cookie = cookieHeader(OWNER_SESSION_COOKIE, token);
+
+  const adminApi = await handleAdmin(
+    new Request("http://127.0.0.1:8787/admin/users", { headers: { cookie } }),
+    env,
+    new URL("http://127.0.0.1:8787/admin/users"),
+  );
+  assert.equal(adminApi.status, 403);
+
+  const other = await handleApi(
+    new Request(`http://127.0.0.1:8787/api/mailboxes/${EMPTY.id}/messages`, {
+      headers: { cookie },
+    }),
+    env,
+    new URL(`http://127.0.0.1:8787/api/mailboxes/${EMPTY.id}/messages`),
+  );
+  assert.equal(other.status, 403);
+});
+
+test("TC10.2 member cannot read another mailbox's message", async () => {
+  const db = new MemoryD1();
+  const user = await seedMember(db);
+  const env = testEnv(db);
+  const token = await signUserSession(SECRET, {
+    mailboxId: EMPTY.id,
+    address: EMPTY.address,
+    userId: user.id,
+    role: "mailbox",
+  });
+  const response = await handleApi(
+    new Request("http://127.0.0.1:8787/api/messages/22222222-2222-4222-8222-222222222221", {
+      headers: { cookie: cookieHeader(OWNER_SESSION_COOKIE, token) },
+    }),
+    env,
+    new URL("http://127.0.0.1:8787/api/messages/22222222-2222-4222-8222-222222222221"),
+  );
+  assert.equal(response.status, 403);
+});
+
+test("TC10.3 admin cannot write the mail audit list", async () => {
+  const env = testEnv();
+  const headers = {
+    authorization: `Bearer ${ADMIN}`,
+    "content-type": "application/json",
+  };
+  for (const method of ["POST", "DELETE", "PUT", "PATCH"]) {
+    const response = await handleAdmin(
+      new Request("http://127.0.0.1:8787/admin/messages", {
+        method,
+        headers,
+        body: method === "GET" ? undefined : "{}",
+      }),
+      env,
+      new URL("http://127.0.0.1:8787/admin/messages"),
+    );
+    assert.equal(response.status, 405, method);
+  }
+
+  const boxes = await handleAdmin(
+    new Request("http://127.0.0.1:8787/admin/mailboxes", {
+      headers: { authorization: `Bearer ${ADMIN}` },
+    }),
+    env,
+    new URL("http://127.0.0.1:8787/admin/mailboxes"),
+  );
+  assert.equal(boxes.status, 200);
+});
+
+test("TC10.4 under-quota storage is allowed", async () => {
+  const db = new MemoryD1();
+  await seedMember(db, { quotaStorage: 500 });
+  db.messages.push({
+    id: "m-small",
+    mailbox_id: EMPTY.id,
+    size_bytes: 80,
+    envelope_from: "a@b.test",
+    envelope_to: EMPTY.address,
+    folder: "inbox",
+    received_at: 1,
+    created_at: 1,
+  });
+  const allowed = await inboundStorageRejection(testEnv(db), EMPTY.id, 50);
+  assert.equal(allowed, null);
+});
+
+test("TC10.1 invalid mailbox does not leave a half-created member", async () => {
+  const db = new MemoryD1();
+  const env = testEnv(db);
+  const created = await handleAdmin(
+    new Request("http://127.0.0.1:8787/admin/users", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${ADMIN}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ login: "ghost", role: "mailbox", mailbox: "not-an-email" }),
+    }),
+    env,
+    new URL("http://127.0.0.1:8787/admin/users"),
+  );
+  assert.equal(created.status, 400);
+  const listed = await handleAdmin(
+    new Request("http://127.0.0.1:8787/admin/users", {
+      headers: { authorization: `Bearer ${ADMIN}` },
+    }),
+    env,
+    new URL("http://127.0.0.1:8787/admin/users"),
+  );
+  const body = (await listed.json()) as { users: { login: string }[] };
+  assert.equal(body.users.some((row) => row.login === "ghost"), false);
+});
+
+test("TC10.5 admin HTML and quota JSON without a session are 401", async () => {
+  const env = testEnv();
+  const page = await handleAdmin(
+    new Request("http://127.0.0.1:8787/admin"),
+    env,
+    new URL("http://127.0.0.1:8787/admin"),
+  );
+  assert.equal(page.status, 401);
+
+  const mailboxes = await handleAdmin(
+    new Request("http://127.0.0.1:8787/admin/mailboxes"),
+    env,
+    new URL("http://127.0.0.1:8787/admin/mailboxes"),
+  );
+  assert.equal(mailboxes.status, 401);
+
+  const messages = await handleAdmin(
+    new Request("http://127.0.0.1:8787/admin/messages"),
+    env,
+    new URL("http://127.0.0.1:8787/admin/messages"),
+  );
+  assert.equal(messages.status, 401);
+});
