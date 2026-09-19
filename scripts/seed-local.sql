@@ -131,7 +131,7 @@ INSERT OR IGNORE INTO messages (
   '确认码 482193。这是未读种子信，打开后应变为已读。',
   '确认码 482193。
 
-这是未读种子信，打开后应变为已读。回复按钮只是入口，不会发出邮件。',
+这是未读种子信，打开后应变为已读。阅读页的回复会预填写信表单。',
   160,
   0,
   'inbox',
@@ -169,6 +169,48 @@ INSERT OR IGNORE INTO messages (
   'inbox',
   1789816200000,
   1789816200000
+);
+
+INSERT OR IGNORE INTO messages (
+  id,
+  mailbox_id,
+  rfc_message_id,
+  envelope_from,
+  envelope_to,
+  subject,
+  snippet,
+  body_text,
+  header_to,
+  header_cc,
+  header_reply_to,
+  in_reply_to,
+  references_header,
+  size_bytes,
+  is_read,
+  folder,
+  received_at,
+  created_at
+) VALUES (
+  '22222222-2222-4222-8222-222222222225',
+  '11111111-1111-4111-8111-111111111111',
+  '<seed-sync@example.test>',
+  'lead@grove.test',
+  'inbox@example.test',
+  '本周同步',
+  '本地种子：多人 To/Cc，用来核对全部回复的收件人。',
+  '本地种子：多人 To/Cc，用来核对全部回复的收件人。
+
+回复应收 To=lead@grove.test；全部回复还应带上 teammate 与 notes，并去掉自己。',
+  'inbox@example.test, teammate@grove.test',
+  'notes@grove.test',
+  NULL,
+  '<seed-sync-root@example.test>',
+  '<seed-sync-root@example.test>',
+  220,
+  0,
+  'inbox',
+  1789816800000,
+  1789816800000
 );
 
 INSERT OR IGNORE INTO attachments (

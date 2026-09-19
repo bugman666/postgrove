@@ -99,6 +99,37 @@ test("ResendAdapter fails loud on 401", async () => {
   assert.match(result.detail ?? "", /Invalid API key/);
 });
 
+test("ResendAdapter forwards cc plus In-Reply-To / References", async () => {
+  let posted: unknown;
+  const adapter = new ResendAdapter("re_fake", async (_url, init) => {
+    posted = JSON.parse(String(init?.body));
+    return new Response(JSON.stringify({ id: "re_1" }), { status: 200 });
+  });
+  const result = await adapter.send({
+    from: FROM,
+    to: "lead@grove.test, teammate@grove.test",
+    cc: "notes@grove.test",
+    subject: "Re: 本周同步",
+    text: "ack",
+    headers: {
+      "In-Reply-To": "<seed-sync@example.test>",
+      References: "<seed-sync-root@example.test> <seed-sync@example.test>",
+    },
+  });
+  assert.equal(result.ok, true);
+  assert.deepEqual(posted, {
+    from: FROM,
+    to: ["lead@grove.test", "teammate@grove.test"],
+    cc: ["notes@grove.test"],
+    subject: "Re: 本周同步",
+    text: "ack",
+    headers: {
+      "In-Reply-To": "<seed-sync@example.test>",
+      References: "<seed-sync-root@example.test> <seed-sync@example.test>",
+    },
+  });
+});
+
 test("HttpAdapter posts JSON and reads provider id", async () => {
   let posted: unknown;
   const adapter = new HttpAdapter("https://hooks.example.test/send", "tok", async (_url, init) => {
@@ -131,6 +162,25 @@ test("parseSendFields rejects a missing or invalid to", () => {
   if (ok.ok) {
     assert.equal(ok.input.to, "neighbor@example.test");
     assert.equal(ok.input.text, "Hello");
+    assert.equal(ok.input.cc, "");
+    assert.equal(ok.input.inReplyTo, null);
+    assert.equal(ok.input.references, null);
+  }
+
+  const reply = parseSendFields({
+    to: "lead@grove.test, teammate@grove.test",
+    cc: "notes@grove.test, lead@grove.test",
+    subject: "Re: 本周同步",
+    text: "ack",
+    in_reply_to: "<seed-sync@example.test>",
+    references: "<seed-sync-root@example.test> <seed-sync@example.test>",
+  });
+  assert.equal(reply.ok, true);
+  if (reply.ok) {
+    assert.equal(reply.input.to, "lead@grove.test, teammate@grove.test");
+    assert.equal(reply.input.cc, "notes@grove.test");
+    assert.equal(reply.input.inReplyTo, "<seed-sync@example.test>");
+    assert.equal(reply.input.references, "<seed-sync-root@example.test> <seed-sync@example.test>");
   }
 });
 

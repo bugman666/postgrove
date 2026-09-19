@@ -18,6 +18,11 @@ export interface MessageRecord {
   subject: string | null;
   snippet: string | null;
   body_text: string | null;
+  header_to: string | null;
+  header_cc: string | null;
+  header_reply_to: string | null;
+  in_reply_to: string | null;
+  references_header: string | null;
   size_bytes: number | null;
   is_read: number;
   folder: string;
@@ -29,7 +34,8 @@ const MAILBOX_COLUMNS =
   "id, address, local_part, domain, display_name, status" as const;
 
 const MESSAGE_COLUMNS = `id, mailbox_id, rfc_message_id, envelope_from, envelope_to,
-  subject, snippet, body_text, size_bytes, is_read, folder, received_at, created_at`;
+  subject, snippet, body_text, header_to, header_cc, header_reply_to, in_reply_to,
+  references_header, size_bytes, is_read, folder, received_at, created_at`;
 
 export async function listMailboxes(env: Env): Promise<MailboxRecord[]> {
   const rows = await env.DB.prepare(
@@ -138,8 +144,11 @@ export interface OutboundAttemptRecord {
   mailbox_id: string;
   from_address: string;
   to_address: string;
+  cc_address: string | null;
   subject: string | null;
   body_text: string | null;
+  in_reply_to: string | null;
+  references_header: string | null;
   provider: string;
   status: "sent" | "failed";
   error: string | null;
@@ -148,8 +157,9 @@ export interface OutboundAttemptRecord {
   created_at: number;
 }
 
-const OUTBOUND_COLUMNS = `id, mailbox_id, from_address, to_address, subject, body_text,
-  provider, status, error, hint, provider_message_id, created_at`;
+const OUTBOUND_COLUMNS = `id, mailbox_id, from_address, to_address, cc_address, subject,
+  body_text, in_reply_to, references_header, provider, status, error, hint,
+  provider_message_id, created_at`;
 
 export async function insertOutboundAttempt(
   env: Env,
@@ -157,17 +167,21 @@ export async function insertOutboundAttempt(
 ): Promise<void> {
   await env.DB.prepare(
     `INSERT INTO outbound_attempts (
-       id, mailbox_id, from_address, to_address, subject, body_text,
-       provider, status, error, hint, provider_message_id, created_at
-     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)`,
+       id, mailbox_id, from_address, to_address, cc_address, subject, body_text,
+       in_reply_to, references_header, provider, status, error, hint,
+       provider_message_id, created_at
+     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)`,
   )
     .bind(
       row.id,
       row.mailbox_id,
       row.from_address,
       row.to_address,
+      row.cc_address,
       row.subject,
       row.body_text,
+      row.in_reply_to,
+      row.references_header,
       row.provider,
       row.status,
       row.error,
