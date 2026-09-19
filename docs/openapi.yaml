@@ -1,0 +1,1588 @@
+openapi: 3.0.3
+info:
+  title: Postgrove REST API
+  version: "1.0.0"
+  description: |
+    Token REST for a **Postgrove** Worker: an own-domain edge mailbox, not a
+    public temp-mail pool and not a multi-provider disposable hub.
+
+    Authenticate with `Authorization: Bearer pg_…` (mailbox or admin kind) or
+    the deploy `ADMIN_TOKEN`. The secret is shown once at mint time; only the
+    SHA-256 hash is stored. Cookie owner routes under `/api/*` (inbox UI) are
+    a separate surface and are not listed here.
+
+    Discover the live catalog at `GET /api/v1` (no secrets). Copy-paste
+    examples live in `docs/API.md`. Operator deploy: `docs/DEPLOY.md`.
+  contact:
+    name: Postgrove
+    url: https://github.com/bugman666/postgrove
+  license:
+    name: MIT
+
+servers:
+  - url: http://127.0.0.1:8787
+    description: Local `wrangler dev`
+  - url: https://mail.example.com
+    description: Own-domain Worker (replace with YOUR_DOMAIN)
+
+tags:
+  - name: Catalog
+    description: Public index. No bearer required.
+  - name: Mailboxes
+    description: List and read addresses. Create is admin-only.
+  - name: Messages
+    description: List and read mail. Token REST has no delete path.
+  - name: Send
+    description: Outbound through the configured provider (`stub` / `resend` / `http`).
+  - name: Aliases
+    description: Plus-tag aliases on the mailbox's own domain only.
+  - name: Tokens
+    description: Mint and revoke `pg_…` keys.
+  - name: Dev inboxes
+    description: Short-lived addresses on this deployment's domain for wait / OTP / link.
+  - name: Public signup
+    description: Turnstile-gated create. Off unless `TURNSTILE_SECRET_KEY` is set.
+  - name: Admin mint
+    description: Create addresses and mint keys with `ADMIN_TOKEN` or an admin-kind `pg_` key.
+
+security:
+  - bearerAuth: []
+
+paths:
+  /api/v1:
+    get:
+      tags: [Catalog]
+      summary: Public API catalog
+      security: []
+      operationId: getApiCatalog
+      responses:
+        "200":
+          description: Service name and a short hint. No secrets.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, service, api]
+                properties:
+                  ok: { type: boolean, example: true }
+                  service: { type: string, example: postgrove }
+                  api: { type: string, example: v1 }
+                  hint:
+                    type: string
+                    example: "Send Authorization: Bearer pg_… (mailbox or admin-kind) or ADMIN_TOKEN. Aliases: /api/v1/aliases. Dev inboxes: /api/v1/dev/inboxes. See README (Open REST API)."
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+
+  /api/v1/public/signup:
+    post:
+      tags: [Public signup]
+      summary: Create an address after a Turnstile challenge
+      security: []
+      operationId: publicSignup
+      description: |
+        Returns **403** `public_signup_disabled` unless `TURNSTILE_SECRET_KEY` is set.
+        The Worker POSTs `secret` + `response` to Cloudflare siteverify.
+        Success creates the mailbox and returns a one-time `pg_…` token.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [address]
+              properties:
+                address: { type: string, example: guest@mail.example.com }
+                display_name: { type: string }
+                turnstile_token: { type: string, description: Cloudflare Turnstile widget token }
+                cf-turnstile-response: { type: string, description: Alternate field name }
+                token: { type: string, description: Alternate field name for the challenge }
+      responses:
+        "201":
+          description: Mailbox created; plaintext token shown once.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, mailbox, token]
+                properties:
+                  ok: { type: boolean, example: true }
+                  mailbox: { $ref: "#/components/schemas/Mailbox" }
+                  token: { $ref: "#/components/schemas/IssuedToken" }
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "403":
+          description: Signup off, or Turnstile failed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                disabled:
+                  value:
+                    ok: false
+                    error: public_signup_disabled
+                    hint: Public signup is off by default. Set TURNSTILE_SECRET_KEY (and TURNSTILE_SITE_KEY for the widget) to enable it, or create addresses with POST /admin/mailboxes (admin) or POST /api/mailboxes (owner session).
+                challenge:
+                  value:
+                    ok: false
+                    error: turnstile_failed
+                    hint: Missing Turnstile token. Send JSON { "address", "turnstile_token" } from a widget that uses TURNSTILE_SITE_KEY.
+        "409":
+          $ref: "#/components/responses/AddressTaken"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /api/v1/mailboxes:
+    get:
+      tags: [Mailboxes]
+      summary: List addresses this token may see
+      operationId: listMailboxes
+      description: |
+        Mailbox-kind `pg_` tokens get only the bound mailbox.
+        Admin-kind tokens and `ADMIN_TOKEN` get every mailbox.
+      responses:
+        "200":
+          description: Address list.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, mailboxes]
+                properties:
+                  ok: { type: boolean, example: true }
+                  mailboxes:
+                    type: array
+                    items: { $ref: "#/components/schemas/Mailbox" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/QuotaOrRateLimited"
+        "503":
+          $ref: "#/components/responses/TokenLookupFailed"
+    post:
+      tags: [Mailboxes]
+      summary: Create an address (admin only)
+      operationId: createMailbox
+      description: |
+        Mailbox-scoped tokens receive **403** `forbidden`. Use `ADMIN_TOKEN`,
+        an admin-kind `pg_` key, `POST /admin/mailboxes`, or an owner session
+        at `POST /api/mailboxes`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [address]
+              properties:
+                address: { type: string, example: support@mail.example.com }
+                display_name: { type: string, example: Support }
+      responses:
+        "201":
+          description: Address created.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, mailbox]
+                properties:
+                  ok: { type: boolean, example: true }
+                  mailbox: { $ref: "#/components/schemas/Mailbox" }
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Mailbox-scoped token cannot create addresses.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                ok: false
+                error: forbidden
+                hint: Mailbox-scoped API tokens cannot create addresses. Use POST /admin/mailboxes with the admin bearer, or POST /api/mailboxes with an owner session. Public signup is POST /api/v1/public/signup when Turnstile is enabled.
+        "409":
+          $ref: "#/components/responses/AddressTaken"
+        "429":
+          $ref: "#/components/responses/QuotaOrRateLimited"
+
+  /api/v1/mailboxes/{mailboxId}:
+    get:
+      tags: [Mailboxes]
+      summary: Read one mailbox
+      operationId: getMailbox
+      parameters:
+        - $ref: "#/components/parameters/MailboxId"
+      responses:
+        "200":
+          description: Mailbox record.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, mailbox]
+                properties:
+                  ok: { type: boolean, example: true }
+                  mailbox: { $ref: "#/components/schemas/Mailbox" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/CrossMailbox"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/QuotaOrRateLimited"
+
+  /api/v1/mailboxes/{mailboxId}/messages:
+    get:
+      tags: [Messages]
+      summary: List messages in a folder
+      operationId: listMailboxMessages
+      parameters:
+        - $ref: "#/components/parameters/MailboxId"
+        - name: folder
+          in: query
+          required: false
+          description: |
+            `inbox` (default), `sent`, `draft`, `trash`, or `spam`.
+            `junk` aliases to `spam`. Any other value is treated as `inbox`.
+          schema:
+            type: string
+            enum: [inbox, sent, draft, trash, spam, junk]
+      responses:
+        "200":
+          description: Folder listing (no full body).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, mailbox, folder, messages]
+                properties:
+                  ok: { type: boolean, example: true }
+                  mailbox: { $ref: "#/components/schemas/Mailbox" }
+                  folder: { type: string, example: inbox }
+                  messages:
+                    type: array
+                    items: { $ref: "#/components/schemas/MessageListItem" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/CrossMailbox"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/QuotaOrRateLimited"
+
+  /api/v1/mailboxes/{mailboxId}/aliases:
+    get:
+      tags: [Aliases]
+      summary: List plus-tag aliases for one mailbox
+      operationId: listMailboxAliases
+      parameters:
+        - $ref: "#/components/parameters/MailboxId"
+      responses:
+        "200":
+          description: Alias list.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AliasList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/CrossMailbox"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/QuotaOrRateLimited"
+    post:
+      tags: [Aliases]
+      summary: Create or generate a plus-tag alias
+      operationId: createMailboxAlias
+      parameters:
+        - $ref: "#/components/parameters/MailboxId"
+      requestBody:
+        $ref: "#/components/requestBodies/AliasCreate"
+      responses:
+        "201":
+          description: Alias created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AliasCreated"
+        "400":
+          description: Invalid address, primary clash, or foreign domain.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                domain:
+                  value:
+                    ok: false
+                    error: alias_domain_forbidden
+                    hint: Aliases must use this mailbox's own domain (mail.example.com). Cross-domain aliases are not allowed.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/CrossMailbox"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Taken, or 50-alias cap (`alias_limit`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                limit:
+                  value: { ok: false, error: alias_limit, hint: This mailbox already has 50 aliases. Revoke one before adding another. }
+                taken:
+                  value: { ok: false, error: alias_taken, hint: That alias is already listed. Choose another tag. }
+        "429":
+          $ref: "#/components/responses/QuotaOrRateLimited"
+
+  /api/v1/messages/{messageId}:
+    get:
+      tags: [Messages]
+      summary: Read one message
+      operationId: getMessage
+      description: |
+        Opening an unread inbox row marks it read. Token REST has **no**
+        delete path; cookie `DELETE /api/messages/:id` is a different surface.
+      parameters:
+        - name: messageId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Message detail including body.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, message]
+                properties:
+                  ok: { type: boolean, example: true }
+                  message: { $ref: "#/components/schemas/MessageDetail" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/CrossMailbox"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/QuotaOrRateLimited"
+
+  /api/v1/send:
+    post:
+      tags: [Send]
+      summary: Send mail from a mailbox this token may use
+      operationId: sendMail
+      description: |
+        Token send uses the bound mailbox. Admin send needs `mailbox_id` or `from`.
+        Optional idempotency via `Idempotency-Key` header or JSON `idempotency_key`
+        (1–128 visible ASCII, no spaces). Replaying the same key returns the
+        stored attempt.
+
+        Config / provider failures are stored as `failed` and returned loud
+        (`outbound_not_configured` **503**, provider reject **502**).
+        Per-token daily send cap is **429** `quota_send`.
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          schema: { type: string, maxLength: 128 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [to]
+              properties:
+                to: { type: string, example: neighbor@example.test }
+                cc: { type: string }
+                subject: { type: string, example: hello }
+                text: { type: string, example: from token REST }
+                body: { type: string, description: Alternate field for text }
+                in_reply_to: { type: string }
+                references: { type: string }
+                mailbox_id:
+                  type: string
+                  description: Required for admin send when the token is not mailbox-bound.
+                from:
+                  type: string
+                  description: Alternate mailbox key for admin send.
+                idempotency_key: { type: string, maxLength: 128 }
+      responses:
+        "200":
+          description: Provider accepted the send (`attempt.status` is `sent`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SendResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/CrossMailbox"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          description: Daily send quota or REST rate limit.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QuotaError"
+        "502":
+          description: Provider rejected the send (`outbound_failed`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SendResult"
+        "503":
+          description: Outbound not configured or unknown provider.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SendResult"
+
+  /api/v1/aliases:
+    get:
+      tags: [Aliases]
+      summary: List aliases for a mailbox
+      operationId: listAliases
+      description: Token callers default to the bound mailbox. Admin callers must pass `mailbox_id` or `address`.
+      parameters:
+        - $ref: "#/components/parameters/MailboxQuery"
+        - $ref: "#/components/parameters/AddressQuery"
+      responses:
+        "200":
+          description: Alias list.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AliasList"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/CrossMailbox"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/QuotaOrRateLimited"
+    post:
+      tags: [Aliases]
+      summary: Create or generate a plus-tag alias
+      operationId: createAlias
+      description: Same body as `POST /api/v1/mailboxes/{mailboxId}/aliases`. Domain must match the mailbox primary.
+      parameters:
+        - $ref: "#/components/parameters/MailboxQuery"
+        - $ref: "#/components/parameters/AddressQuery"
+      requestBody:
+        $ref: "#/components/requestBodies/AliasCreate"
+      responses:
+        "201":
+          description: Alias created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AliasCreated"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/CrossMailbox"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: "`alias_taken` or `alias_limit`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/QuotaOrRateLimited"
+
+  /api/v1/aliases/{aliasId}/revoke:
+    post:
+      tags: [Aliases]
+      summary: Revoke a plus-tag alias
+      operationId: revokeAlias
+      parameters:
+        - name: aliasId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Alias removed.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, alias]
+                properties:
+                  ok: { type: boolean, example: true }
+                  alias: { $ref: "#/components/schemas/Alias" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/CrossMailbox"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/QuotaOrRateLimited"
+
+  /api/v1/tokens:
+    get:
+      tags: [Tokens]
+      summary: List token metadata (no plaintext secrets)
+      operationId: listTokens
+      description: Token callers default to the bound mailbox. Admin callers must pass `mailbox_id` or `address`.
+      parameters:
+        - $ref: "#/components/parameters/MailboxQuery"
+        - $ref: "#/components/parameters/AddressQuery"
+      responses:
+        "200":
+          description: Prefix + label only. The secret is never listed.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, mailbox, tokens]
+                properties:
+                  ok: { type: boolean, example: true }
+                  mailbox: { $ref: "#/components/schemas/Mailbox" }
+                  tokens:
+                    type: array
+                    items: { $ref: "#/components/schemas/TokenMeta" }
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/CrossMailbox"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/QuotaOrRateLimited"
+    post:
+      tags: [Tokens]
+      summary: Mint a `pg_…` token
+      operationId: mintToken
+      description: |
+        Mailbox-scoped tokens cannot mint `kind=admin` (**403**).
+        Daily quotas default to `REST_QUOTA_REQUESTS_DAILY` / `REST_QUOTA_SEND_DAILY`
+        (0 = unlimited) when omitted.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                label: { type: string, example: local-ci }
+                mailbox_id: { type: string }
+                address: { type: string }
+                kind:
+                  type: string
+                  enum: [mailbox, admin]
+                  default: mailbox
+                quota_requests_daily: { type: integer, minimum: 0, description: "0 = unlimited" }
+                quota_send_daily: { type: integer, minimum: 0, description: "0 = unlimited" }
+      responses:
+        "201":
+          description: Token minted. Store `token.token` now.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, mailbox, token]
+                properties:
+                  ok: { type: boolean, example: true }
+                  mailbox: { $ref: "#/components/schemas/Mailbox" }
+                  token: { $ref: "#/components/schemas/IssuedToken" }
+                  hint:
+                    type: string
+                    example: Store the token now. Only the hash is kept; the secret is shown once.
+        "400":
+          description: Missing mailbox, disabled mailbox, or bad JSON.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                disabled:
+                  value:
+                    ok: false
+                    error: mailbox_disabled
+                    hint: Mint tokens only for an active mailbox.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Mailbox token tried to mint an admin key.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/QuotaOrRateLimited"
+
+  /api/v1/tokens/{tokenId}/revoke:
+    post:
+      tags: [Tokens]
+      summary: Revoke a `pg_…` token
+      operationId: revokeToken
+      description: Mailbox-scoped tokens cannot revoke admin-kind keys (**403**).
+      parameters:
+        - name: tokenId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Token revoked (or already revoked).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, token]
+                properties:
+                  ok: { type: boolean, example: true }
+                  token: { $ref: "#/components/schemas/TokenMeta" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/QuotaOrRateLimited"
+
+  /api/v1/dev/inboxes:
+    get:
+      tags: [Dev inboxes]
+      summary: List ephemeral inboxes this principal owns
+      operationId: listDevInboxes
+      description: Mailbox tokens see their own rows. Admin sees up to 100 recent rows.
+      responses:
+        "200":
+          description: Inbox list (lazy-expired on read).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, inboxes]
+                properties:
+                  ok: { type: boolean, example: true }
+                  inboxes:
+                    type: array
+                    items: { $ref: "#/components/schemas/DevInbox" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/QuotaOrRateLimited"
+    post:
+      tags: [Dev inboxes]
+      summary: Create a short-lived address on this deployment's domain
+      operationId: createDevInbox
+      description: |
+        Own-domain only. Foreign domains return **400** `own_domain_only`.
+        Generated local parts look like `dev-<12 hex>@YOUR_DOMAIN` and do **not**
+        use `+tag`. Close the inbox when finished.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                ttl_seconds:
+                  type: integer
+                  minimum: 30
+                  description: Default 900 (`DEV_INBOX_TTL_SECONDS`). Hard cap 3600.
+                domain:
+                  type: string
+                  example: mail.example.com
+                  description: Must already be this deployment's mail domain.
+                local_part:
+                  type: string
+                  example: dev-ab12
+                  description: Lowercase letters, digits, `.`, `_`, `-`. No `+`.
+                display_name:
+                  type: string
+                  example: Dev inbox
+      responses:
+        "201":
+          description: Inbox opened.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, inbox, mailbox]
+                properties:
+                  ok: { type: boolean, example: true }
+                  inbox: { $ref: "#/components/schemas/DevInbox" }
+                  mailbox: { $ref: "#/components/schemas/Mailbox" }
+                  hint:
+                    type: string
+                    example: 这是本站自有域名上的开发收件箱，不是公共临时邮箱。用完请 close。
+        "400":
+          description: "`own_domain_only`, `invalid_address`, or `ttl_seconds` below 30."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                own_domain:
+                  value:
+                    ok: false
+                    error: own_domain_only
+                    hint: 仅支持本站自有域名，不是公共临时邮箱池。请使用部署域名或已有邮箱的域名。
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: Address taken, or open-inbox quota (`quota_dev_inboxes`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QuotaError"
+              examples:
+                quota:
+                  value:
+                    ok: false
+                    error: quota_dev_inboxes
+                    hint: 配额已满：打开的开发收件箱已达上限（已用 8 / 上限 8）。先 close 再用，或提高 DEV_INBOX_QUOTA。
+                    used: 8
+                    limit: 8
+        "429":
+          $ref: "#/components/responses/QuotaOrRateLimited"
+
+  /api/v1/dev/inboxes/{inboxId}:
+    get:
+      tags: [Dev inboxes]
+      summary: Read one ephemeral inbox
+      operationId: getDevInbox
+      parameters:
+        - $ref: "#/components/parameters/InboxId"
+      responses:
+        "200":
+          description: Inbox record (may flip to `expired` if TTL elapsed).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, inbox]
+                properties:
+                  ok: { type: boolean, example: true }
+                  inbox: { $ref: "#/components/schemas/DevInbox" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/DevForbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/QuotaOrRateLimited"
+
+  /api/v1/dev/inboxes/{inboxId}/wait:
+    get:
+      tags: [Dev inboxes]
+      summary: Long-poll until a matching message arrives
+      operationId: waitDevInboxGet
+      description: Same filters as POST, via query string.
+      parameters:
+        - $ref: "#/components/parameters/InboxId"
+        - $ref: "#/components/parameters/WaitTimeout"
+        - $ref: "#/components/parameters/WaitSince"
+        - $ref: "#/components/parameters/WaitSubject"
+        - $ref: "#/components/parameters/WaitFrom"
+        - $ref: "#/components/parameters/WaitContains"
+        - $ref: "#/components/parameters/WaitExtract"
+        - $ref: "#/components/parameters/WaitPattern"
+        - $ref: "#/components/parameters/WaitHost"
+      responses:
+        "200":
+          $ref: "#/components/responses/WaitMatch"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/DevForbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "408":
+          $ref: "#/components/responses/WaitTimeout"
+        "409":
+          $ref: "#/components/responses/InboxClosed"
+        "422":
+          $ref: "#/components/responses/ExtractFailed"
+        "429":
+          $ref: "#/components/responses/QuotaOrRateLimited"
+    post:
+      tags: [Dev inboxes]
+      summary: Long-poll until a matching message arrives
+      operationId: waitDevInboxPost
+      description: |
+        Polls D1 until a message matches `since` (epoch ms, exclusive),
+        `subject`, `from`, or `contains` (case-insensitive). Default
+        `timeout_ms` is 8000; hard cap `DEV_WAIT_MAX_MS` (default 20000).
+        `timeout_ms=0` is a single check. Optional `extract` (`otp` / `link`)
+        runs the helper after a match.
+      parameters:
+        - $ref: "#/components/parameters/InboxId"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                timeout_ms: { type: integer, minimum: 0, example: 8000 }
+                since: { type: integer, description: Exclusive epoch milliseconds }
+                subject: { type: string }
+                from: { type: string }
+                contains: { type: string, example: "482193" }
+                extract:
+                  type: string
+                  enum: [otp, link]
+                pattern: { type: string, maxLength: 200 }
+                host: { type: string }
+      responses:
+        "200":
+          $ref: "#/components/responses/WaitMatch"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/DevForbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "408":
+          $ref: "#/components/responses/WaitTimeout"
+        "409":
+          $ref: "#/components/responses/InboxClosed"
+        "422":
+          $ref: "#/components/responses/ExtractFailed"
+        "429":
+          $ref: "#/components/responses/QuotaOrRateLimited"
+
+  /api/v1/dev/inboxes/{inboxId}/extract:
+    post:
+      tags: [Dev inboxes]
+      summary: Extract OTP or https link from the latest (or named) message
+      operationId: extractDevInbox
+      description: |
+        Default `kind` is `otp`. Rules fail loud — the helper does not guess.
+
+        | kind | Rule order | Fail |
+        |------|------------|------|
+        | `otp` | 1. Labeled 验证码 / code / OTP + 4–8 alphanumeric. 2. Else a single standalone 4–8 digit run (years `19xx`/`20xx` ignored). | `extract_failed` / `extract_ambiguous` |
+        | `link` | 1. Labeled verify/confirm/点击/验证 + `https://`. 2. Else first `https://`. Optional `host`. | No https → `extract_failed` |
+        | either | `pattern` — JS regex, first capture or full match, max 200 chars. | `invalid_pattern` |
+      parameters:
+        - $ref: "#/components/parameters/InboxId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                kind:
+                  type: string
+                  enum: [otp, link]
+                  default: otp
+                message_id: { type: string, format: uuid }
+                pattern: { type: string, maxLength: 200 }
+                host: { type: string }
+            examples:
+              otp:
+                value: { kind: otp }
+              link:
+                value: { kind: link }
+              custom:
+                value: { kind: otp, pattern: "token=([A-Z0-9-]+)" }
+      responses:
+        "200":
+          description: Extract succeeded.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, inbox, message, extract]
+                properties:
+                  ok: { type: boolean, example: true }
+                  inbox: { $ref: "#/components/schemas/DevInbox" }
+                  message: { $ref: "#/components/schemas/DevMessage" }
+                  extract: { $ref: "#/components/schemas/ExtractOk" }
+        "400":
+          description: "`invalid_kind` or `invalid_pattern`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/DevForbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/InboxClosed"
+        "422":
+          $ref: "#/components/responses/ExtractFailed"
+        "429":
+          $ref: "#/components/responses/QuotaOrRateLimited"
+
+  /api/v1/dev/inboxes/{inboxId}/close:
+    post:
+      tags: [Dev inboxes]
+      summary: Close an ephemeral inbox (idempotent)
+      operationId: closeDevInbox
+      description: |
+        Disables the mailbox (inbound `setReject`) and sets status `closed`.
+        Repeat close returns **200** with `already_closed: true`.
+      parameters:
+        - $ref: "#/components/parameters/InboxId"
+      responses:
+        "200":
+          description: Closed, or already closed / expired.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, inbox]
+                properties:
+                  ok: { type: boolean, example: true }
+                  already_closed: { type: boolean }
+                  inbox: { $ref: "#/components/schemas/DevInbox" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/DevForbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/QuotaOrRateLimited"
+
+  /admin/mailboxes:
+    post:
+      tags: [Admin mint]
+      summary: Create an address with the admin bearer
+      operationId: adminCreateMailbox
+      description: Same JSON body as `POST /api/v1/mailboxes`. Requires `ADMIN_TOKEN` or an admin-kind `pg_` key (not a mailbox token).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [address]
+              properties:
+                address: { type: string, example: support@mail.example.com }
+                display_name: { type: string }
+      responses:
+        "201":
+          description: Address created.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, mailbox]
+                properties:
+                  ok: { type: boolean, example: true }
+                  mailbox: { $ref: "#/components/schemas/Mailbox" }
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/AddressTaken"
+
+  /admin/tokens:
+    get:
+      tags: [Admin mint]
+      summary: List token metadata for a mailbox
+      operationId: adminListTokens
+      parameters:
+        - $ref: "#/components/parameters/MailboxQuery"
+        - $ref: "#/components/parameters/AddressQuery"
+      responses:
+        "200":
+          description: Prefix + label only.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, mailbox, tokens]
+                properties:
+                  ok: { type: boolean, example: true }
+                  mailbox: { $ref: "#/components/schemas/Mailbox" }
+                  tokens:
+                    type: array
+                    items: { $ref: "#/components/schemas/TokenMeta" }
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    post:
+      tags: [Admin mint]
+      summary: Mint a mailbox or admin `pg_…` token
+      operationId: adminMintToken
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [mailbox_id]
+              properties:
+                mailbox_id: { type: string }
+                address: { type: string, description: Alternate mailbox key }
+                label: { type: string }
+                kind:
+                  type: string
+                  enum: [mailbox, admin]
+                  default: mailbox
+                quota_requests_daily: { type: integer, minimum: 0 }
+                quota_send_daily: { type: integer, minimum: 0 }
+      responses:
+        "201":
+          description: Token minted. Store `token.token` now.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, mailbox, token]
+                properties:
+                  ok: { type: boolean, example: true }
+                  mailbox: { $ref: "#/components/schemas/Mailbox" }
+                  token: { $ref: "#/components/schemas/IssuedToken" }
+                  hint: { type: string }
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /admin/tokens/{tokenId}/revoke:
+    post:
+      tags: [Admin mint]
+      summary: Revoke any `pg_…` token
+      operationId: adminRevokeToken
+      parameters:
+        - name: tokenId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Token revoked.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, token]
+                properties:
+                  ok: { type: boolean, example: true }
+                  token: { $ref: "#/components/schemas/TokenMeta" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
+      description: |
+        Mailbox or admin API token (`pg_…`) or the deploy `ADMIN_TOKEN`.
+        Mint with an owner session (`POST /api/tokens`) or admin (`POST /admin/tokens`).
+        Mailbox keys stay on one address. Admin keys may act across mailboxes.
+
+  parameters:
+    MailboxId:
+      name: mailboxId
+      in: path
+      required: true
+      description: Mailbox UUID or full address.
+      schema: { type: string }
+    InboxId:
+      name: inboxId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    MailboxQuery:
+      name: mailbox_id
+      in: query
+      required: false
+      schema: { type: string }
+    AddressQuery:
+      name: address
+      in: query
+      required: false
+      schema: { type: string }
+    WaitTimeout:
+      name: timeout_ms
+      in: query
+      schema: { type: integer, minimum: 0 }
+    WaitSince:
+      name: since
+      in: query
+      schema: { type: integer }
+    WaitSubject:
+      name: subject
+      in: query
+      schema: { type: string }
+    WaitFrom:
+      name: from
+      in: query
+      schema: { type: string }
+    WaitContains:
+      name: contains
+      in: query
+      schema: { type: string }
+    WaitExtract:
+      name: extract
+      in: query
+      schema: { type: string, enum: [otp, link] }
+    WaitPattern:
+      name: pattern
+      in: query
+      schema: { type: string }
+    WaitHost:
+      name: host
+      in: query
+      schema: { type: string }
+
+  requestBodies:
+    AliasCreate:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              generate:
+                type: boolean
+                description: When true, mints `local+<8 hex>@domain`.
+              action:
+                type: string
+                description: '`"generate"` is the same as `generate: true`.'
+              address:
+                type: string
+                example: user+tag@mail.example.com
+          examples:
+            generate:
+              value: { generate: true }
+            explicit:
+              value: { address: user+promo@mail.example.com }
+
+  schemas:
+    Mailbox:
+      type: object
+      required: [id, address, status]
+      properties:
+        id: { type: string, format: uuid }
+        address: { type: string, example: inbox@mail.example.com }
+        display_name: { type: string, nullable: true }
+        status:
+          type: string
+          enum: [active, disabled]
+
+    MessageListItem:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        mailbox_id: { type: string, format: uuid }
+        from: { type: string, nullable: true }
+        to: { type: string, nullable: true }
+        subject: { type: string, nullable: true }
+        snippet: { type: string, nullable: true }
+        is_read: { type: boolean }
+        is_starred: { type: boolean }
+        folder: { type: string }
+        received_at: { type: integer }
+
+    MessageDetail:
+      allOf:
+        - $ref: "#/components/schemas/MessageListItem"
+        - type: object
+          properties:
+            rfc_message_id: { type: string, nullable: true }
+            body_text: { type: string, nullable: true }
+            header_to: { type: string, nullable: true }
+            header_cc: { type: string, nullable: true }
+            header_reply_to: { type: string, nullable: true }
+            in_reply_to: { type: string, nullable: true }
+            references: { type: string, nullable: true }
+            size_bytes: { type: integer, nullable: true }
+
+    Alias:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        mailbox_id: { type: string, format: uuid }
+        address: { type: string, example: inbox+promo@mail.example.com }
+        local_part: { type: string }
+        domain: { type: string }
+        created_at: { type: integer }
+
+    AliasList:
+      type: object
+      required: [ok, mailbox, aliases]
+      properties:
+        ok: { type: boolean, example: true }
+        mailbox: { $ref: "#/components/schemas/Mailbox" }
+        aliases:
+          type: array
+          items: { $ref: "#/components/schemas/Alias" }
+
+    AliasCreated:
+      type: object
+      required: [ok, mailbox, alias]
+      properties:
+        ok: { type: boolean, example: true }
+        mailbox: { $ref: "#/components/schemas/Mailbox" }
+        alias: { $ref: "#/components/schemas/Alias" }
+
+    TokenMeta:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        mailbox_id: { type: string, format: uuid }
+        prefix: { type: string, example: pg_abcdefghij }
+        label: { type: string, nullable: true }
+        kind:
+          type: string
+          enum: [mailbox, admin]
+        quota_requests_daily: { type: integer }
+        quota_send_daily: { type: integer }
+        created_at: { type: integer }
+        revoked_at: { type: integer, nullable: true }
+
+    IssuedToken:
+      allOf:
+        - $ref: "#/components/schemas/TokenMeta"
+        - type: object
+          properties:
+            token:
+              type: string
+              example: pg_…
+              description: Plaintext secret, shown once. Never listed later.
+
+    SendResult:
+      type: object
+      required: [ok, attempt]
+      properties:
+        ok: { type: boolean }
+        attempt: { $ref: "#/components/schemas/OutboundAttempt" }
+        sent:
+          nullable: true
+          allOf:
+            - $ref: "#/components/schemas/MessageDetail"
+        error: { type: string, nullable: true }
+        hint: { type: string, nullable: true }
+
+    OutboundAttempt:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        mailbox_id: { type: string, format: uuid }
+        from: { type: string }
+        to: { type: string }
+        cc: { type: string, nullable: true }
+        subject: { type: string, nullable: true }
+        in_reply_to: { type: string, nullable: true }
+        references: { type: string, nullable: true }
+        provider: { type: string }
+        status:
+          type: string
+          enum: [pending, sent, failed]
+        error: { type: string, nullable: true }
+        hint: { type: string, nullable: true }
+        provider_message_id: { type: string, nullable: true }
+        idempotency_key: { type: string }
+        attempt_count: { type: integer }
+        max_attempts: { type: integer }
+        sent_message_id: { type: string, nullable: true }
+        created_at: { type: integer }
+        updated_at: { type: integer }
+
+    DevInbox:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        mailbox_id: { type: string, format: uuid }
+        address: { type: string, example: dev-ab12cd34ef56@mail.example.com }
+        domain: { type: string, example: mail.example.com }
+        status:
+          type: string
+          enum: [open, closed, expired]
+        expires_at: { type: integer }
+        closed_at: { type: integer, nullable: true }
+        created_at: { type: integer }
+
+    DevMessage:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        mailbox_id: { type: string, format: uuid }
+        from: { type: string, nullable: true }
+        to: { type: string, nullable: true }
+        subject: { type: string, nullable: true }
+        snippet: { type: string, nullable: true }
+        body_text: { type: string, nullable: true }
+        received_at: { type: integer }
+
+    ExtractOk:
+      type: object
+      required: [ok, kind, value, rule]
+      properties:
+        ok: { type: boolean, example: true }
+        kind:
+          type: string
+          enum: [otp, link]
+        value: { type: string, example: "482193" }
+        rule: { type: string }
+
+    Error:
+      type: object
+      required: [ok, error]
+      properties:
+        ok: { type: boolean, example: false }
+        error: { type: string }
+        hint: { type: string }
+        detail: { type: string }
+
+    QuotaError:
+      allOf:
+        - $ref: "#/components/schemas/Error"
+        - type: object
+          properties:
+            used: { type: integer }
+            limit: { type: integer }
+
+  responses:
+    Unauthorized:
+      description: Missing, invalid, or revoked bearer.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          examples:
+            missing:
+              value:
+                ok: false
+                error: unauthorized
+                hint: "Send Authorization: Bearer <API token> (pg_…). Mint one with an owner session (POST /api/tokens) or admin (POST /admin/tokens)."
+            invalid:
+              value:
+                ok: false
+                error: unauthorized
+                hint: Invalid API token. Use a pg_… token or the admin bearer.
+    Forbidden:
+      description: Caller is not allowed to do this.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            ok: false
+            error: forbidden
+            hint: This API token is bound to another mailbox. Use a token minted for that address.
+    CrossMailbox:
+      description: Mailbox-scoped token used on another mailbox.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            ok: false
+            error: forbidden
+            hint: This API token is bound to another mailbox. Use a token minted for that address.
+    DevForbidden:
+      description: Token tried to operate another tenant's dev inbox.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            ok: false
+            error: forbidden
+            hint: 无权限：不能操作其他租户的开发收件箱。
+    NotFound:
+      description: Unknown mailbox, message, token, alias, or inbox.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            ok: false
+            error: not_found
+            hint: Unknown mailbox or message.
+    InvalidRequest:
+      description: Missing or invalid JSON.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            ok: false
+            error: invalid_request
+            hint: 'Send JSON { "to", "subject", "text" } (optional cc, in_reply_to, references, mailbox_id).'
+    AddressTaken:
+      description: Address already exists.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            ok: false
+            error: address_taken
+            hint: That address is already in this grove.
+    PayloadTooLarge:
+      description: JSON body over `REST_BODY_MAX_BYTES` (default 256000).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            ok: false
+            error: payload_too_large
+            hint: JSON body is too large (limit 256000 bytes). Shrink the payload and retry. See README rate / size limits.
+            max_bytes: 256000
+    MethodNotAllowed:
+      description: Wrong HTTP method.
+      headers:
+        Allow:
+          schema: { type: string }
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example: { ok: false, error: method_not_allowed }
+    RateLimited:
+      description: Fixed-window limiter (`rate_limited`).
+      headers:
+        Retry-After:
+          schema: { type: integer }
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            ok: false
+            error: rate_limited
+            hint: Too many REST API requests from this token or network. Limit is 60 per 60 seconds. Wait and retry.
+            retry_after_seconds: 42
+    QuotaOrRateLimited:
+      description: |
+        Daily token quota (`quota_api` **429**) or fixed-window `rate_limited` **429**.
+        `quota_send` is also **429** on send. `0` on a quota column means unlimited.
+      headers:
+        Retry-After:
+          schema: { type: integer }
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/QuotaError"
+          examples:
+            quota_api:
+              value:
+                ok: false
+                error: quota_api
+                hint: Daily REST request quota reached.
+                used: 100
+                limit: 100
+            rate:
+              value:
+                ok: false
+                error: rate_limited
+                hint: Too many REST API requests from this token or network. Limit is 60 per 60 seconds. Wait and retry.
+                retry_after_seconds: 12
+    TokenLookupFailed:
+      description: D1 token table missing or unreachable.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            ok: false
+            error: token_lookup_failed
+            hint: Check the D1 binding and that migration 0008_api_tokens.sql has been applied.
+    WaitMatch:
+      description: A message matched the filter.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [ok, inbox, message]
+            properties:
+              ok: { type: boolean, example: true }
+              inbox: { $ref: "#/components/schemas/DevInbox" }
+              message: { $ref: "#/components/schemas/DevMessage" }
+              extract: { $ref: "#/components/schemas/ExtractOk" }
+    WaitTimeout:
+      description: No match before `timeout_ms`.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            ok: false
+            error: wait_timeout
+            hint: 等待超时：时限内未收到匹配邮件。
+            timeout_ms: 8000
+    InboxClosed:
+      description: Inbox is closed or expired.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          examples:
+            closed:
+              value:
+                ok: false
+                error: inbox_closed
+                hint: 收件箱已关闭，不再接收邮件。
+            expired:
+              value:
+                ok: false
+                error: inbox_expired
+                hint: 收件箱已过期，不再接收邮件。
+    ExtractFailed:
+      description: Helper could not extract a unique value.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          examples:
+            none:
+              value:
+                ok: false
+                error: extract_failed
+                hint: 未能抽出：这个开发收件箱还没有邮件。
+            ambiguous:
+              value:
+                ok: false
+                error: extract_ambiguous
+                hint: 抽出结果不唯一。

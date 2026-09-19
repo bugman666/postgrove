@@ -1,0 +1,44 @@
+Postgrove REST — own-domain edge mailbox. Not a public temp-mail pool.
+
+Auth: Authorization: Bearer pg_… (mailbox or admin kind) or ADMIN_TOKEN.
+Mint: POST /api/tokens (owner cookie) or POST /admin/tokens (admin). Secret shown once.
+Contract: docs/openapi.yaml  Examples: docs/API.md  Deploy: docs/DEPLOY.md
+
+GET  /api/v1                         public catalog
+POST /api/v1/public/signup           Turnstile-gated create (403 if TURNSTILE_SECRET_KEY unset)
+
+GET  /api/v1/mailboxes               list (mailbox token: bound address only)
+POST /api/v1/mailboxes               create — admin only (403 for mailbox tokens)
+GET  /api/v1/mailboxes/:id           read mailbox (id or address)
+GET  /api/v1/mailboxes/:id/messages  list folder (folder=inbox|sent|draft|trash|spam)
+GET  /api/v1/mailboxes/:id/aliases   list plus-tag aliases (own domain)
+POST /api/v1/mailboxes/:id/aliases   create/generate alias
+GET  /api/v1/messages/:id            read (marks inbox unread as read; no DELETE on /api/v1)
+POST /api/v1/send                    send (Idempotency-Key optional)
+
+GET  /api/v1/aliases                 list (mailbox_id query if admin)
+POST /api/v1/aliases                 create/generate {generate:true} or {address}
+POST /api/v1/aliases/:id/revoke      revoke alias
+
+GET  /api/v1/tokens                  list metadata (no plaintext)
+POST /api/v1/tokens                  mint (mailbox tokens cannot mint kind=admin)
+POST /api/v1/tokens/:id/revoke       revoke
+
+GET  /api/v1/dev/inboxes             list ephemeral inboxes (own domain)
+POST /api/v1/dev/inboxes             create (ttl_seconds, optional local_part/domain)
+GET  /api/v1/dev/inboxes/:id         read
+GET  /api/v1/dev/inboxes/:id/wait    long-poll (timeout_ms, subject, from, contains, since)
+POST /api/v1/dev/inboxes/:id/wait    same filters in JSON
+POST /api/v1/dev/inboxes/:id/extract {kind:otp|link} fail loud
+POST /api/v1/dev/inboxes/:id/close   idempotent
+
+POST /admin/mailboxes                create address (ADMIN_TOKEN or admin-kind pg_)
+GET  /admin/tokens                   list (mailbox_id query)
+POST /admin/tokens                   mint mailbox or admin key
+POST /admin/tokens/:id/revoke        revoke
+
+Loud errors: unauthorized 401, forbidden 403, not_found 404, invalid_request 400,
+rate_limited 429, quota_api 429, quota_send 429, quota_dev_inboxes 409,
+payload_too_large 413, own_domain_only 400, wait_timeout 408,
+inbox_closed/inbox_expired 409, extract_failed 422,
+outbound_not_configured 503, outbound_failed 502.

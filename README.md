@@ -76,7 +76,7 @@ npm run seed:local               # sample mailboxes + messages + one R2 attachme
 npm run dev
 ```
 
-`wrangler dev` serves the Worker at `http://127.0.0.1:8787` by default.
+`wrangler dev` serves the Worker at `http://127.0.0.1:8787` by default. For a remote Worker, see [Deploy](#deploy).
 
 ### Unit tests (MemoryD1)
 
@@ -464,7 +464,7 @@ Quota errors are loud: `quota_addresses` **409**, `quota_storage` **409** (inbou
 
 ### Open REST API (`/api/v1`) + abuse controls
 
-Token API for automating address and mail ops. Cookie owner `/api/*` (inbox UI JSON) is unchanged and still uses `requireOwner`.
+Token API for automating address and mail ops. Cookie owner `/api/*` (inbox UI JSON) is unchanged and still uses `requireOwner`. Machine-readable contract: [docs/openapi.yaml](docs/openapi.yaml). Copy-paste examples: [docs/API.md](docs/API.md).
 
 **Two key kinds.** A token hashed at rest (`SHA-256`) looks like `pg_…`. Only the hash is stored. The plaintext secret is shown **once** at mint time. Member sessions (`users` + `user_mailboxes`) are a separate cookie path; a `pg_` token does not impersonate a member role.
 
@@ -662,34 +662,11 @@ npx wrangler d1 execute postgrove --local --command \
   "SELECT address FROM mailboxes; SELECT subject, envelope_from, envelope_to, folder, is_read FROM messages;"
 ```
 
-## Remote placeholders
+## Deploy
+
+Remote Workers + Email Routing is a one-path operator checklist (D1, R2, `RATE_LIMIT` KV, secrets, MX). See [docs/DEPLOY.md](docs/DEPLOY.md). Production login must not stay on the shared `OWNER_TOKEN` — read [docs/PRODUCTION_AUTH.md](docs/PRODUCTION_AUTH.md) first.
 
 `wrangler.jsonc` ships with dummy D1 / KV ids. Replace them after creating a real D1 database and `RATE_LIMIT` namespace. Do not commit account tokens, API keys, or filled `.dev.vars`.
-
-```bash
-npx wrangler login
-npx wrangler d1 create postgrove
-# paste the printed database_id into wrangler.jsonc
-npm run db:migrate:remote
-npx wrangler r2 bucket create postgrove-attachments
-# confirm wrangler.jsonc r2_buckets.bucket_name matches
-npx wrangler kv namespace create RATE_LIMIT
-# paste the printed id into wrangler.jsonc kv_namespaces (binding RATE_LIMIT)
-# optional preview namespace: npx wrangler kv namespace create RATE_LIMIT --preview
-npx wrangler secret put SESSION_SECRET
-npx wrangler secret put OWNER_TOKEN   # break-glass only; prefer POST /admin/users
-npx wrangler secret put ADMIN_TOKEN
-# then create mailbox members — see docs/PRODUCTION_AUTH.md
-# optional public signup (off until both are set):
-# npx wrangler secret put TURNSTILE_SECRET_KEY
-# npx wrangler secret put TURNSTILE_SITE_KEY
-# when sending for real:
-# npx wrangler secret put RESEND_API_KEY
-# set OUTBOUND_PROVIDER=resend as a Worker var (or http + OUTBOUND_HTTP_URL)
-npx wrangler deploy
-```
-
-Then, in the Cloudflare dashboard, enable Email Routing for your domain and add a rule that sends matching addresses to the `postgrove` Worker.
 
 ## Layout
 
@@ -748,8 +725,12 @@ Then, in the Cloudflare dashboard, enable Email Routing for your domain and add 
 | `test/helpers/memory-d1.ts` | Shared in-memory D1 / R2 for unit tests |
 | `test/fixtures/mime/` | Malicious / odd inbound MIME samples |
 | `scripts/smoke-local.sh` | S1–S5 / S8 curl pack (`npm run smoke:local` after `wrangler dev`) |
-| `wrangler.jsonc` | Worker + D1 + R2 bindings (placeholders) |
+| `wrangler.jsonc` | Worker + D1 + R2 + `RATE_LIMIT` KV bindings (placeholders) |
 | `.dev.vars.example` | Local secret / outbound / attachment-cap / Turnstile / REST limit template |
+| `docs/openapi.yaml` | OpenAPI 3 contract for `/api/v1` + admin mint + dev inboxes |
+| `docs/API.md` | Short REST examples (curl) |
+| `docs/DEPLOY.md` | One-path deploy + Email Routing checklist |
+| `docs/llms.txt` | Plain-text route index (same facts as the OpenAPI summary) |
 
 ## License
 
