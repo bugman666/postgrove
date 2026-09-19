@@ -21,6 +21,7 @@ import {
 import {
   countUnreadInbox,
   createMailbox,
+  ensureMailboxThreadIds,
   getInboxMessage,
   getMailbox,
   getMailboxMessage,
@@ -28,6 +29,7 @@ import {
   insertDraft,
   listFolderMessages,
   listInboxMessages,
+  listInboxMessagesByThreadId,
   listMailboxesForUser,
   searchInboxMessages,
   listOutboundAttempts,
@@ -44,8 +46,9 @@ import {
 import { bindUserMailbox, getUser, mailboxAllowed } from "./users.ts";
 import {
   findThreadById,
-  groupMessagesIntoThreads,
+  groupMessagesByStoredThreadId,
   latestThreadMessage,
+  threadFromStoredId,
   threadHasStar,
   threadHasUnread,
   type MessageThread,
@@ -291,8 +294,9 @@ export async function handleApi(
 async function inboxThreads(env: Env, mailbox: MailboxRecord, url: URL): Promise<MessageThread[]> {
   const q = parseSearchQuery(url.searchParams.get("q"));
   const filter = parseInboxFilter(url.searchParams.get("filter"));
+  await ensureMailboxThreadIds(env, mailbox.id);
   const messages = await listInboxMessages(env, mailbox.id, { q, filter });
-  return groupMessagesIntoThreads(messages);
+  return groupMessagesByStoredThreadId(messages);
 }
 
 async function listThreads(env: Env, mailbox: MailboxRecord, url: URL): Promise<Response> {
@@ -317,8 +321,11 @@ async function readThread(
   threadId: string,
   _url: URL,
 ): Promise<Response> {
-  const messages = await listInboxMessages(env, mailbox.id, {});
-  const thread = findThreadById(groupMessagesIntoThreads(messages), threadId);
+  await ensureMailboxThreadIds(env, mailbox.id);
+  const members = await listInboxMessagesByThreadId(env, mailbox.id, threadId);
+  const thread = members.length > 0
+    ? threadFromStoredId(threadId, members)
+    : findThreadById(await inboxThreads(env, mailbox, _url), threadId);
   if (!thread) {
     return notFoundJson();
   }
@@ -935,6 +942,7 @@ function publicMessageListItem(row: MessageRecord) {
     is_starred: row.is_starred === 1,
     folder: row.folder,
     received_at: row.received_at,
+    thread_id: row.thread_id ?? null,
   };
 }
 

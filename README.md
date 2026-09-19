@@ -230,11 +230,11 @@ Browser: sign in, use the search box, **未读** in the nav (or the 未读 chip)
 
 ### Conversation threads
 
-Inbox grouping is **good enough for personal / small-team mail**, not a full Gmail conversation model. No extra D1 column: threads are derived from the current inbox list (same `q` / `filter` as search).
+Inbox grouping is **good enough for personal / small-team mail**, not a full Gmail conversation model. Each message stores a `thread_id` (citation `mid:<root Message-ID>` or subject `subj:<hash>`) so a conversation stays one row when the root falls outside the list `LIMIT 200` window.
 
-1. **Citation (preferred).** Messages that share `In-Reply-To` / `References` tokens, or whose `rfc_message_id` is cited by another inbox row, become one thread. The stable id is `mid:` plus the root Message-ID (first `References` token, else `In-Reply-To`, else the oldest member's own id), without angle brackets.
+1. **Citation (preferred).** Messages that share `In-Reply-To` / `References` tokens, or whose `rfc_message_id` is cited by another row, become one thread. The stable id is `mid:` plus the root Message-ID (first `References` token, else `In-Reply-To`, else the oldest member's own id), without angle brackets. Inbound and outbound inserts look up those neighbors and persist the same id.
 2. **Subject fallback.** Rows with **no** citation headers and **not** cited by anyone else group when the normalized subject **and** the from+to participant pair match. Normalization lowercases the subject and repeatedly strips `Re:` / `Fwd:` / `Fw:` / `Forward:` / `回复:` / `转发:` (ASCII and fullwidth colon). Empty subjects stay singleton so blanks do not collapse into one pile.
-3. **List / open.** `GET /api/threads` is one row per thread with `message_count`. `GET /api/threads/:id` returns members ordered by `received_at` ascending. The HTML list shows the count; `/box/:id/t/:threadId` expands the stack. Sent / drafts / trash / spam stay flat folder lists.
+3. **List / open.** `GET /api/threads` groups the current list window by stored `thread_id` (same `q` / `filter` as search). `GET /api/threads/:id` returns **all** inbox members with that id, ordered by `received_at` ascending — not only the rows in the 200-message window. The HTML list shows the count; `/box/:id/t/:threadId` expands the stack. Sent / drafts / trash / spam stay flat folder lists.
 
 **Fallback caveats (intentional).** Same subject from different people stays separate. A reply that never sets citation headers will not join the cited thread even if the subject matches. MIME `Re[2]:` / folded headers / missing parents that use different ids are out of scope. Re-seed to see 「本周同步」(citation) and 「办公室钥匙」(subject fallback).
 
@@ -740,6 +740,7 @@ Then, in the Cloudflare dashboard, enable Email Routing for your domain and add 
 | `migrations/0014_webhook_secret_envelope.sql` | `webhook_secret` envelope-at-rest contract (lazy upgrade of leftover plaintext) |
 | `migrations/0015_outbound_outbox.sql` | `outbound_attempts` pending + idempotency_key + retry columns |
 | `migrations/0016_messages_fts.sql` | `messages_fts` FTS5 index + sync triggers + backfill |
+| `migrations/0017_message_thread_id.sql` | Persist `messages.thread_id` + `(mailbox_id, thread_id, received_at)` |
 | `scripts/seed-local.sql` | Local sample mailboxes + messages (not for remote) |
 | `scripts/seed-grove-note.txt` | Local sample attachment bytes |
 | `test/helpers/memory-d1.ts` | Shared in-memory D1 / R2 for unit tests |

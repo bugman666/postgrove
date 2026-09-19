@@ -6,6 +6,13 @@ import {
 } from "./folders.ts";
 import { chunkIds, sqlInPlaceholders, uniqueIds } from "./sql-in.ts";
 import {
+  candidateThreadIds,
+  groupMessagesIntoThreads,
+  relatedLookupRfcIds,
+  resolveThreadIdForInsert,
+  storedThreadId,
+} from "./threads.ts";
+import {
   escapeFts5Query,
   likeContains,
   SEARCH_ENGINE_FTS5,
@@ -43,6 +50,7 @@ export interface MessageRecord {
   folder: string;
   received_at: number;
   created_at: number;
+  thread_id?: string | null;
 }
 
 export interface InboxQuery {
@@ -53,14 +61,18 @@ export interface InboxQuery {
 const MAILBOX_COLUMNS =
   "id, address, local_part, domain, display_name, status" as const;
 
+export const INBOX_LIST_LIMIT = 200;
+
 const MESSAGE_COLUMNS = `id, mailbox_id, rfc_message_id, envelope_from, envelope_to,
   subject, snippet, body_text, header_to, header_cc, header_reply_to, in_reply_to,
-  references_header, size_bytes, is_read, is_starred, folder, received_at, created_at`;
+  references_header, size_bytes, is_read, is_starred, folder, received_at, created_at,
+  thread_id`;
 
 /** List/thread grouping columns — omit `body_text` so open-thread does not rescan full bodies. */
 const MESSAGE_HEAD_COLUMNS = `id, mailbox_id, rfc_message_id, envelope_from, envelope_to,
   subject, snippet, header_to, header_cc, header_reply_to, in_reply_to,
-  references_header, size_bytes, is_read, is_starred, folder, received_at, created_at`;
+  references_header, size_bytes, is_read, is_starred, folder, received_at, created_at,
+  thread_id`;
 
 export async function listMailboxes(env: Env): Promise<MailboxRecord[]> {
   const rows = await env.DB.prepare(
@@ -299,7 +311,7 @@ async function queryInboxMessages(
     `SELECT ${columns} FROM messages
      WHERE ${sql}
      ORDER BY received_at DESC, created_at DESC
-     LIMIT 200`,
+     LIMIT ${INBOX_LIST_LIMIT}`,
   )
     .bind(...binds)
     .all<MessageRecord>();
@@ -422,6 +434,195 @@ export async function getMailboxMessagesByIds(
     .filter((row): row is MessageRecord => Boolean(row));
 }
 
+export async function listInboxMessagesByThreadId(
+  env: Env,
+  mailboxId: string,
+  threadId: string,
+): Promise<MessageRecord[]> {
+  const key = threadId.trim();
+  if (!key) {
+    return [];
+  }
+  const rows = await env.DB.prepare(
+    `SELECT ${MESSAGE_COLUMNS} FROM messages
+     WHERE mailbox_id = ?1 AND folder = 'inbox' AND thread_id = ?2
+     ORDER BY received_at ASC, created_at ASC`,
+  )
+    .bind(mailboxId, key)
+    .all<MessageRecord>();
+  return rows.results ?? [];
+}
+
+export async function listMailboxMessageHeads(
+  env: Env,
+  mailboxId: string,
+): Promise<MessageRecord[]> {
+  const rows = await env.DB.prepare(
+    `SELECT ${MESSAGE_HEAD_COLUMNS} FROM messages
+     WHERE mailbox_id = ?1
+     ORDER BY received_at ASC, created_at ASC`,
+  )
+    .bind(mailboxId)
+    .all<MessageRecord>();
+  return (rows.results ?? []).map((row) => ({ ...row, body_text: row.body_text ?? null }));
+}
+
+export async function findRelatedThreadMessages(
+  env: Env,
+  mailboxId: string,
+  message: {
+    id?: string;
+    rfc_message_id?: string | null;
+    in_reply_to?: string | null;
+    references_header?: string | null;
+    subject?: string | null;
+    envelope_from: string;
+    envelope_to: string;
+    thread_id?: string | null;
+  },
+): Promise<MessageRecord[]> {
+  const rfcIds = relatedLookupRfcIds(message);
+  const threadIds = candidateThreadIds(message);
+  if (rfcIds.length === 0 && threadIds.length === 0) {
+    return [];
+  }
+
+  const found: MessageRecord[] = [];
+  const seen = new Set<string>();
+  const remember = (rows: MessageRecord[]) => {
+    for (const row of rows) {
+      if (message.id && row.id === message.id) {
+        continue;
+      }
+      if (seen.has(row.id)) {
+        continue;
+      }
+      seen.add(row.id);
+      found.push(row);
+    }
+  };
+
+  for (const chunk of chunkIds(rfcIds)) {
+    const rfcPlace = sqlInPlaceholders(2, chunk.length);
+    const irtPlace = sqlInPlaceholders(2 + chunk.length, chunk.length);
+    const rows = await env.DB.prepare(
+      `SELECT ${MESSAGE_HEAD_COLUMNS} FROM messages
+       WHERE mailbox_id = ?1
+         AND (rfc_message_id IN (${rfcPlace}) OR in_reply_to IN (${irtPlace}))`,
+    )
+      .bind(mailboxId, ...chunk, ...chunk)
+      .all<MessageRecord>();
+    remember(rows.results ?? []);
+  }
+
+  for (const chunk of chunkIds(threadIds)) {
+    const placeholders = sqlInPlaceholders(2, chunk.length);
+    const rows = await env.DB.prepare(
+      `SELECT ${MESSAGE_HEAD_COLUMNS} FROM messages
+       WHERE mailbox_id = ?1 AND thread_id IN (${placeholders})`,
+    )
+      .bind(mailboxId, ...chunk)
+      .all<MessageRecord>();
+    remember(rows.results ?? []);
+  }
+
+  if (found.length === 0) {
+    return [];
+  }
+
+  const extraThreadIds = uniqueIds(
+    found.map((row) => storedThreadId(row) ?? "").filter(Boolean),
+  ).filter((id) => !threadIds.includes(id));
+  for (const chunk of chunkIds(extraThreadIds)) {
+    const placeholders = sqlInPlaceholders(2, chunk.length);
+    const rows = await env.DB.prepare(
+      `SELECT ${MESSAGE_HEAD_COLUMNS} FROM messages
+       WHERE mailbox_id = ?1 AND thread_id IN (${placeholders})`,
+    )
+      .bind(mailboxId, ...chunk)
+      .all<MessageRecord>();
+    remember(rows.results ?? []);
+  }
+
+  return found.map((row) => ({ ...row, body_text: row.body_text ?? null }));
+}
+
+export async function applyMessageThreadIds(
+  env: Env,
+  mailboxId: string,
+  assignments: ReadonlyArray<{ id: string; thread_id: string }>,
+): Promise<number> {
+  const byThread = new Map<string, string[]>();
+  for (const item of assignments) {
+    const threadId = item.thread_id.trim();
+    const id = item.id.trim();
+    if (!threadId || !id) {
+      continue;
+    }
+    const list = byThread.get(threadId) ?? [];
+    list.push(id);
+    byThread.set(threadId, list);
+  }
+  let changes = 0;
+  for (const [threadId, ids] of byThread) {
+    for (const chunk of chunkIds(ids)) {
+      const placeholders = sqlInPlaceholders(3, chunk.length);
+      const result = await env.DB.prepare(
+        `UPDATE messages SET thread_id = ?2
+         WHERE mailbox_id = ?1 AND id IN (${placeholders})`,
+      )
+        .bind(mailboxId, threadId, ...chunk)
+        .run();
+      changes += Number(result.meta.changes ?? 0);
+    }
+  }
+  return changes;
+}
+
+/** One-time (per mailbox) backfill using the same Union-Find rules as list grouping. */
+export async function ensureMailboxThreadIds(env: Env, mailboxId: string): Promise<number> {
+  const pending = await env.DB.prepare(
+    `SELECT id FROM messages WHERE mailbox_id = ?1 AND thread_id IS NULL LIMIT 1`,
+  )
+    .bind(mailboxId)
+    .first<{ id: string }>();
+  if (!pending) {
+    return 0;
+  }
+  const all = await listMailboxMessageHeads(env, mailboxId);
+  const threads = groupMessagesIntoThreads(all);
+  const assignments: { id: string; thread_id: string }[] = [];
+  for (const thread of threads) {
+    for (const member of thread.messages) {
+      if (storedThreadId(member) !== thread.id) {
+        assignments.push({ id: member.id, thread_id: thread.id });
+      }
+    }
+  }
+  if (assignments.length === 0) {
+    return 0;
+  }
+  return applyMessageThreadIds(env, mailboxId, assignments);
+}
+
+export async function persistThreadIdOnRecord(
+  env: Env,
+  mailboxId: string,
+  row: MessageRecord,
+): Promise<MessageRecord> {
+  await ensureMailboxThreadIds(env, mailboxId);
+  const related = await findRelatedThreadMessages(env, mailboxId, row);
+  const resolved = resolveThreadIdForInsert(row, related);
+  const next = { ...row, thread_id: resolved.threadId };
+  const realign = resolved.members
+    .filter((member) => member.id !== row.id && storedThreadId(member) !== resolved.threadId)
+    .map((member) => ({ id: member.id, thread_id: resolved.threadId }));
+  if (realign.length > 0) {
+    await applyMessageThreadIds(env, mailboxId, realign);
+  }
+  return next;
+}
+
 export async function countUnreadInbox(env: Env, mailboxId: string): Promise<number> {
   const row = await env.DB.prepare(
     `SELECT COUNT(*) AS unread_count FROM messages
@@ -441,7 +642,7 @@ export async function listFolderMessages(
     `SELECT ${MESSAGE_COLUMNS} FROM messages
      WHERE mailbox_id = ?1 AND folder = ?2
      ORDER BY received_at DESC, created_at DESC
-     LIMIT 200`,
+     LIMIT ${INBOX_LIST_LIMIT}`,
   )
     .bind(mailboxId, folder)
     .all<MessageRecord>();
@@ -589,7 +790,11 @@ export async function insertDraft(
   now = Date.now(),
 ): Promise<MessageRecord> {
   const id = crypto.randomUUID();
-  const row = draftRecord(id, mailbox, fields, now, now);
+  const row = await persistThreadIdOnRecord(
+    env,
+    mailbox.id,
+    draftRecord(id, mailbox, fields, now, now),
+  );
   await insertMessage(env, row);
   return row;
 }
@@ -605,12 +810,16 @@ export async function updateDraft(
   if (!existing || existing.folder !== "draft") {
     return null;
   }
-  const row = draftRecord(existing.id, mailbox, fields, now, existing.created_at);
+  const row = await persistThreadIdOnRecord(
+    env,
+    mailbox.id,
+    draftRecord(existing.id, mailbox, fields, now, existing.created_at),
+  );
   const result = await env.DB.prepare(
     `UPDATE messages
      SET envelope_from = ?3, envelope_to = ?4, subject = ?5, snippet = ?6,
          body_text = ?7, header_cc = ?8, in_reply_to = ?9, references_header = ?10,
-         received_at = ?11
+         received_at = ?11, thread_id = ?12
      WHERE id = ?1 AND mailbox_id = ?2 AND folder = 'draft'`,
   )
     .bind(
@@ -625,6 +834,7 @@ export async function updateDraft(
       row.in_reply_to,
       row.references_header,
       row.received_at,
+      row.thread_id ?? null,
     )
     .run();
   if ((result.meta.changes ?? 0) === 0) {
@@ -647,7 +857,11 @@ export async function insertSentMessage(
   now = Date.now(),
 ): Promise<MessageRecord> {
   const id = crypto.randomUUID();
-  const row = sentRecord(id, mailbox, fields, now, now);
+  const row = await persistThreadIdOnRecord(
+    env,
+    mailbox.id,
+    sentRecord(id, mailbox, fields, now, now),
+  );
   await insertMessage(env, row);
   return row;
 }
@@ -670,12 +884,16 @@ export async function promoteDraftToSent(
   if (!existing || existing.folder !== "draft") {
     return null;
   }
-  const row = sentRecord(existing.id, mailbox, fields, now, existing.created_at);
+  const row = await persistThreadIdOnRecord(
+    env,
+    mailbox.id,
+    sentRecord(existing.id, mailbox, fields, now, existing.created_at),
+  );
   const result = await env.DB.prepare(
     `UPDATE messages
      SET folder = 'sent', envelope_from = ?3, envelope_to = ?4, subject = ?5,
          snippet = ?6, body_text = ?7, header_cc = ?8, in_reply_to = ?9,
-         references_header = ?10, is_read = 1, received_at = ?11
+         references_header = ?10, is_read = 1, received_at = ?11, thread_id = ?12
      WHERE id = ?1 AND mailbox_id = ?2 AND folder = 'draft'`,
   )
     .bind(
@@ -690,6 +908,7 @@ export async function promoteDraftToSent(
       row.in_reply_to,
       row.references_header,
       row.received_at,
+      row.thread_id ?? null,
     )
     .run();
   if ((result.meta.changes ?? 0) === 0) {
@@ -704,8 +923,8 @@ export async function insertMessage(env: Env, row: MessageRecord): Promise<void>
        id, mailbox_id, rfc_message_id, envelope_from, envelope_to,
        subject, snippet, body_text, header_to, header_cc, header_reply_to,
        in_reply_to, references_header, size_bytes, is_read, is_starred, folder,
-       received_at, created_at
-     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)`,
+       received_at, created_at, thread_id
+     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)`,
   )
     .bind(
       row.id,
@@ -727,6 +946,7 @@ export async function insertMessage(env: Env, row: MessageRecord): Promise<void>
       row.folder,
       row.received_at,
       row.created_at,
+      row.thread_id ?? null,
     )
     .run();
 }
@@ -758,6 +978,7 @@ function draftRecord(
     folder: "draft",
     received_at: receivedAt,
     created_at: createdAt,
+    thread_id: null,
   };
 }
 
@@ -795,6 +1016,7 @@ function sentRecord(
     folder: "sent",
     received_at: receivedAt,
     created_at: createdAt,
+    thread_id: null,
   };
 }
 

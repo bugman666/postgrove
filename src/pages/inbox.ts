@@ -6,7 +6,7 @@ import { folderEmptyKey, folderLabelKey } from "../i18n.ts";
 import type { MailboxRecord, MessageRecord } from "../store.ts";
 import {
   findThreadForMessage,
-  groupMessagesIntoThreads,
+  groupMessagesByStoredThreadId,
   latestThreadMessage,
   threadHasUnread,
   type MessageThread,
@@ -56,7 +56,7 @@ export function renderInboxPage(
         : q
           ? tr(shell, "heading.search")
           : tr(shell, "nav.inbox");
-  const threads = groupMessagesIntoThreads(messages);
+  const threads = groupMessagesByStoredThreadId(messages);
   const selectedThread = flags.thread
     ?? (selected ? findThreadForMessage(threads, selected.id) : null);
   const emptyCopy = emptyInboxCopy(shell, messages.length, q, filter);

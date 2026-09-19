@@ -1113,6 +1113,7 @@ function publicMessageListItem(row: MessageRecord) {
     is_starred: row.is_starred === 1,
     folder: row.folder,
     received_at: row.received_at,
+    thread_id: row.thread_id ?? null,
   };
 }
 
