@@ -45,6 +45,14 @@ import {
   type MessageRecord,
   type OutboundAttemptRecord,
 } from "./store";
+import {
+  findThreadById,
+  findThreadForMessage,
+  groupMessagesIntoThreads,
+  latestThreadMessage,
+  threadHasUnread,
+  type MessageThread,
+} from "./threads";
 import { parseInboxFilter, parseSearchQuery, type InboxFilter } from "./triage";
 
 type NavId = SystemFolder | "unread" | "compose" | "addresses" | "settings";
@@ -179,6 +187,42 @@ export async function handleUi(
     return redirect(safeNext(stringField(data.get("next")), `${messagePath(mailbox.id, messageId)}${inboxQuery(url)}`));
   }
 
+  const threadMatch = path.match(/^\/box\/([^/]+)\/t\/([^/]+)$/);
+  if (threadMatch) {
+    if (method !== "GET") {
+      return pageMethodNotAllowed();
+    }
+    const mailbox = await allowedMailbox(env, owner, decodeURIComponent(threadMatch[1]));
+    if (!mailbox) {
+      return forbiddenOrMissing(ownMailbox, unreadCount);
+    }
+    const threadId = decodeURIComponent(threadMatch[2]);
+    const view = readInboxView(url);
+    const listed = await listInboxMessages(env, mailbox.id, view);
+    const visible = findThreadById(groupMessagesIntoThreads(listed), threadId);
+    if (!visible) {
+      return html(renderNotFound(mailbox, unreadCount), 404);
+    }
+    const allInbox = await listInboxMessages(env, mailbox.id, {});
+    const thread = findThreadById(groupMessagesIntoThreads(allInbox), threadId) ?? visible;
+    for (const member of thread.messages) {
+      if (member.folder === "inbox" && member.is_read !== 1) {
+        await markRead(env, mailbox.id, member.id);
+      }
+    }
+    unreadCount = await countUnreadInbox(env, mailbox.id);
+    const refreshed = await listInboxMessages(env, mailbox.id, view);
+    const openedAll = await listInboxMessages(env, mailbox.id, {});
+    const opened = findThreadById(groupMessagesIntoThreads(openedAll), threadId) ?? thread;
+    const attachments = await collectThreadAttachments(env, mailbox.id, opened);
+    return html(renderInboxPage(mailbox, refreshed, latestThreadMessage(opened), {
+      attachments,
+      thread: opened,
+      unreadCount,
+      ...view,
+    }));
+  }
+
   const readMatch = path.match(/^\/box\/([^/]+)\/m\/([^/]+)$/);
   if (readMatch) {
     if (method !== "GET") {
@@ -210,13 +254,23 @@ export async function handleUi(
       folder === "inbox"
         ? await listInboxMessages(env, mailbox.id, view)
         : await listFolderMessages(env, mailbox.id, folder);
-    const attachments = await listMessageAttachments(env, mailbox.id, message.id);
+    const openedThread =
+      folder === "inbox"
+        ? findThreadForMessage(
+            groupMessagesIntoThreads(await listInboxMessages(env, mailbox.id, {})),
+            message.id,
+          )
+        : null;
+    const attachments = openedThread
+      ? await collectThreadAttachments(env, mailbox.id, openedThread)
+      : await listMessageAttachments(env, mailbox.id, message.id);
     if (url.searchParams.get("reply") === "1") {
       return redirect(composeHref(mailbox, "reply", message.id));
     }
     if (folder === "inbox") {
       return html(renderInboxPage(mailbox, messages, message, {
         attachments,
+        thread: openedThread,
         unreadCount,
         ...view,
       }));
@@ -651,6 +705,39 @@ function messageHref(
   return `${messagePath(mailbox.id, messageId)}${inboxQuery({ q, filter }, extra)}`;
 }
 
+function threadPath(mailboxId: string, threadId: string): string {
+  return `/box/${encodeURIComponent(mailboxId)}/t/${encodeURIComponent(threadId)}`;
+}
+
+function threadHref(
+  mailbox: MailboxRecord,
+  threadId: string,
+  q: string,
+  filter: InboxFilter,
+): string {
+  return `${threadPath(mailbox.id, threadId)}${inboxQuery({ q, filter })}`;
+}
+
+async function collectThreadAttachments(
+  env: Env,
+  mailboxId: string,
+  thread: MessageThread,
+): Promise<AttachmentRecord[]> {
+  const collected: AttachmentRecord[] = [];
+  for (const member of thread.messages) {
+    const rows = await listMessageAttachments(env, mailboxId, member.id);
+    collected.push(...rows);
+  }
+  return collected;
+}
+
+function attachmentsForMessage(
+  attachments: AttachmentRecord[],
+  messageId: string,
+): AttachmentRecord[] {
+  return attachments.filter((row) => row.message_id === messageId);
+}
+
 function renderInboxPage(
   mailbox: MailboxRecord,
   messages: MessageRecord[],
@@ -659,6 +746,7 @@ function renderInboxPage(
     deleted?: boolean;
     markedUnread?: boolean;
     attachments?: AttachmentRecord[];
+    thread?: MessageThread | null;
     unreadCount: number;
     q: string;
     filter: InboxFilter;
@@ -668,17 +756,29 @@ function renderInboxPage(
   const filter = flags.filter;
   const heading =
     filter === "unread" ? "未读" : filter === "starred" ? "星标" : q ? "搜索" : "收件箱";
+  const threads = groupMessagesIntoThreads(messages);
+  const selectedThread = flags.thread
+    ?? (selected ? findThreadForMessage(threads, selected.id) : null);
   const emptyCopy = emptyInboxCopy(messages.length, q, filter);
   const list = messages.length === 0
     ? emptyBlock(emptyCopy)
-    : `<ul class="msg-list">${messages.map((row) => messageRow(mailbox, row, selected?.id, q, filter)).join("")}</ul>`;
+    : `<ul class="msg-list">${threads.map((thread) => threadRow(mailbox, thread, selectedThread?.id, q, filter)).join("")}</ul>`;
 
   let reading: string;
-  if (selected) {
+  if (selected && selectedThread && selectedThread.messages.length > 1) {
+    reading = renderThreadReading(
+      mailbox,
+      selectedThread,
+      selected.id,
+      flags.attachments ?? [],
+      q,
+      filter,
+    );
+  } else if (selected) {
     reading = renderReading(
       mailbox,
       selected,
-      flags.attachments ?? [],
+      attachmentsForMessage(flags.attachments ?? [], selected.id),
       q,
       filter,
     );
@@ -836,37 +936,43 @@ function emptyInboxCopy(count: number, q: string, filter: InboxFilter): string {
   return "还没有信。域名路由配好后，寄一封到你的地址试试。";
 }
 
-function messageRow(
+function threadRow(
   mailbox: MailboxRecord,
-  row: MessageRecord,
-  selectedId: string | undefined,
+  thread: MessageThread,
+  selectedThreadId: string | undefined,
   q: string,
   filter: InboxFilter,
 ): string {
-  const unread = row.is_read !== 1;
-  const starred = row.is_starred === 1;
-  const selected = row.id === selectedId ? " selected" : "";
+  const latest = latestThreadMessage(thread);
+  const unread = threadHasUnread(thread);
+  const starred = latest.is_starred === 1;
+  const selected = thread.id === selectedThreadId ? " selected" : "";
   const unreadClass = unread ? " unread" : "";
-  const subject = row.subject?.trim() ? row.subject : "（无主题）";
-  const snippet = row.snippet?.trim() ?? "";
+  const subject = latest.subject?.trim() ? latest.subject : "（无主题）";
+  const snippet = latest.snippet?.trim() ?? "";
+  const count = thread.messages.length;
+  const countBadge =
+    count > 1
+      ? `<span class="thread-count" title="${count} 封">${count}</span>`
+      : "";
   const dot = unread
     ? `<span class="unread-dot" title="未读"></span>`
     : "";
-  const href = messageHref(mailbox, row.id, q, filter);
-  const next = selectedId
-    ? messageHref(mailbox, selectedId, q, filter)
+  const href = threadHref(mailbox, thread.id, q, filter);
+  const next = selectedThreadId
+    ? threadHref(mailbox, selectedThreadId, q, filter)
     : viewHref(mailbox, q, filter);
   const starLabel = starred ? "取消星标" : "星标";
   return `<li class="msg-row">
-    <form class="star-form" method="post" action="${escapeHtml(`${messagePath(mailbox.id, row.id)}/star`)}">
+    <form class="star-form" method="post" action="${escapeHtml(`${messagePath(mailbox.id, latest.id)}/star`)}">
       <input type="hidden" name="starred" value="${starred ? "0" : "1"}">
       <input type="hidden" name="next" value="${escapeHtml(next)}">
       <button class="star-btn${starred ? " on" : ""}" type="submit" title="${starLabel}" aria-label="${starLabel}">${starred ? "★" : "☆"}</button>
     </form>
     <a class="msg${unreadClass}${selected}" href="${escapeHtml(href)}">
       <div class="msg-top">
-        <span class="from">${dot}${escapeHtml(row.envelope_from)}</span>
-        <time class="time" datetime="${escapeHtml(new Date(row.received_at).toISOString())}">${escapeHtml(formatReceived(row.received_at))}</time>
+        <span class="from">${dot}${escapeHtml(latest.envelope_from)}${countBadge}</span>
+        <time class="time" datetime="${escapeHtml(new Date(latest.received_at).toISOString())}">${escapeHtml(formatReceived(latest.received_at))}</time>
       </div>
       <div class="subject">${escapeHtml(subject)}</div>
       <p class="snippet">${escapeHtml(snippet)}</p>
@@ -882,6 +988,53 @@ function renderReading(
   filter: InboxFilter = "all",
   folder: SystemFolder = "inbox",
 ): string {
+  const label = FOLDER_LABELS[folder];
+  const backHref = folder === "inbox" ? viewHref(mailbox, q, filter) : boxPath(mailbox.id, folder);
+  return `<div class="read-inner">
+    <a class="back" href="${escapeHtml(backHref)}">← ${escapeHtml(label)}</a>
+    ${renderReadArticle(mailbox, message, attachments, q, filter, folder)}
+  </div>`;
+}
+
+function renderThreadReading(
+  mailbox: MailboxRecord,
+  thread: MessageThread,
+  selectedId: string,
+  attachments: AttachmentRecord[],
+  q: string,
+  filter: InboxFilter,
+): string {
+  const latest = latestThreadMessage(thread);
+  const subject = latest.subject?.trim() ? latest.subject : "（无主题）";
+  const backHref = viewHref(mailbox, q, filter);
+  const cards = thread.messages
+    .map((member) => {
+      const current = member.id === selectedId ? " current" : "";
+      return `<div class="thread-item${current}">${renderReadArticle(
+        mailbox,
+        member,
+        attachmentsForMessage(attachments, member.id),
+        q,
+        filter,
+        "inbox",
+      )}</div>`;
+    })
+    .join("");
+  return `<div class="read-inner">
+    <a class="back" href="${escapeHtml(backHref)}">← 收件箱</a>
+    <p class="thread-summary">${escapeHtml(subject)} · ${thread.messages.length} 封 · 按时间排列</p>
+    <div class="thread-stack">${cards}</div>
+  </div>`;
+}
+
+function renderReadArticle(
+  mailbox: MailboxRecord,
+  message: MessageRecord,
+  attachments: AttachmentRecord[],
+  q: string,
+  filter: InboxFilter,
+  folder: SystemFolder,
+): string {
   const subject = message.subject?.trim() ? message.subject : "（无主题）";
   const body = message.body_text?.trim()
     ? escapeHtml(message.body_text)
@@ -889,8 +1042,6 @@ function renderReading(
   const replyHref = composeHref(mailbox, "reply", message.id);
   const replyAllHref = composeHref(mailbox, "reply-all", message.id);
   const forwardHref = composeHref(mailbox, "forward", message.id);
-  const label = FOLDER_LABELS[folder];
-  const backHref = folder === "inbox" ? viewHref(mailbox, q, filter) : boxPath(mailbox.id, folder);
   const next = messageHref(mailbox, message.id, q, filter);
   const starred = message.is_starred === 1;
   const starLabel = starred ? "取消星标" : "星标";
@@ -933,9 +1084,7 @@ function renderReading(
         </form>`);
   }
 
-  return `<div class="read-inner">
-    <a class="back" href="${escapeHtml(backHref)}">← ${escapeHtml(label)}</a>
-    <article class="read-card">
+  return `<article class="read-card">
       <header class="read-head">
         <h1>${escapeHtml(subject)}</h1>
       </header>
@@ -950,8 +1099,7 @@ function renderReading(
       </div>
       ${renderAttachmentsHtml(attachments)}
       <pre class="body">${body}</pre>
-    </article>
-  </div>`;
+    </article>`;
 }
 
 function moveForm(

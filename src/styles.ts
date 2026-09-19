@@ -436,6 +436,42 @@ textarea:focus-visible {
   vertical-align: middle;
 }
 
+.thread-count {
+  display: inline-block;
+  margin-left: 6px;
+  min-width: 18px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--pg-color-surface-muted);
+  color: var(--pg-color-text-secondary);
+  font-size: var(--pg-text-xs);
+  font-weight: 650;
+  line-height: 18px;
+  text-align: center;
+  vertical-align: middle;
+}
+
+.msg.unread .thread-count {
+  background: var(--pg-color-accent);
+  color: #F7F5F0;
+}
+
+.thread-summary {
+  margin: 0 0 var(--pg-space-3);
+  color: var(--pg-color-text-secondary);
+  font-size: var(--pg-text-sm);
+}
+
+.thread-stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--pg-space-4);
+}
+
+.thread-item.current .read-card {
+  box-shadow: inset 3px 0 0 var(--pg-color-brand), var(--pg-shadow-sm);
+}
+
 .read,
 .page {
   min-width: 0;

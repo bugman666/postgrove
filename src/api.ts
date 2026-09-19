@@ -29,6 +29,14 @@ import {
   type MessageRecord,
   type OutboundAttemptRecord,
 } from "./store";
+import {
+  findThreadById,
+  groupMessagesIntoThreads,
+  latestThreadMessage,
+  threadHasStar,
+  threadHasUnread,
+  type MessageThread,
+} from "./threads";
 import { parseInboxFilter, parseSearchQuery, SEARCH_ENGINE } from "./triage";
 
 export async function handleApi(
@@ -96,6 +104,29 @@ export async function handleApi(
       return methodNotAllowed("GET");
     }
     return json({ ok: true, folders: publicFolderList() });
+  }
+
+  if (path === "/api/threads") {
+    if (method !== "GET") {
+      return methodNotAllowed("GET");
+    }
+    const mailbox = await getMailbox(env, owner.mailboxId);
+    if (!mailbox) {
+      return notFoundJson();
+    }
+    return listThreads(env, mailbox, url);
+  }
+
+  const oneThread = path.match(/^\/api\/threads\/([^/]+)$/);
+  if (oneThread) {
+    if (method !== "GET") {
+      return methodNotAllowed("GET");
+    }
+    const mailbox = await getMailbox(env, owner.mailboxId);
+    if (!mailbox) {
+      return notFoundJson();
+    }
+    return readThread(env, mailbox, decodeURIComponent(oneThread[1]), url);
   }
 
   if (path === "/api/drafts") {
@@ -187,6 +218,47 @@ export async function handleApi(
   }
 
   return notFoundJson();
+}
+
+async function inboxThreads(env: Env, mailbox: MailboxRecord, url: URL): Promise<MessageThread[]> {
+  const q = parseSearchQuery(url.searchParams.get("q"));
+  const filter = parseInboxFilter(url.searchParams.get("filter"));
+  const messages = await listInboxMessages(env, mailbox.id, { q, filter });
+  return groupMessagesIntoThreads(messages);
+}
+
+async function listThreads(env: Env, mailbox: MailboxRecord, url: URL): Promise<Response> {
+  const q = parseSearchQuery(url.searchParams.get("q"));
+  const filter = parseInboxFilter(url.searchParams.get("filter"));
+  const threads = await inboxThreads(env, mailbox, url);
+  const unreadCount = await countUnreadInbox(env, mailbox.id);
+  return json({
+    ok: true,
+    mailbox: publicMailbox(mailbox),
+    folder: "inbox",
+    q,
+    filter,
+    unread_count: unreadCount,
+    threads: threads.map(publicThreadListItem),
+  });
+}
+
+async function readThread(
+  env: Env,
+  mailbox: MailboxRecord,
+  threadId: string,
+  _url: URL,
+): Promise<Response> {
+  const messages = await listInboxMessages(env, mailbox.id, {});
+  const thread = findThreadById(groupMessagesIntoThreads(messages), threadId);
+  if (!thread) {
+    return notFoundJson();
+  }
+  return json({
+    ok: true,
+    mailbox: publicMailbox(mailbox),
+    thread: publicThreadDetail(thread),
+  });
 }
 
 async function searchMessages(env: Env, mailbox: MailboxRecord, url: URL): Promise<Response> {
@@ -657,5 +729,33 @@ function publicMessageDetail(row: MessageRecord) {
     references: row.references_header,
     folder: row.folder,
     size_bytes: row.size_bytes,
+  };
+}
+
+function publicThreadListItem(thread: MessageThread) {
+  const latest = latestThreadMessage(thread);
+  return {
+    id: thread.id,
+    kind: thread.kind,
+    mailbox_id: latest.mailbox_id,
+    message_count: thread.messages.length,
+    latest_message_id: latest.id,
+    from: latest.envelope_from,
+    to: latest.envelope_to,
+    subject: latest.subject,
+    snippet: latest.snippet,
+    is_read: !threadHasUnread(thread),
+    is_starred: threadHasStar(thread),
+    folder: latest.folder,
+    received_at: latest.received_at,
+  };
+}
+
+function publicThreadDetail(thread: MessageThread) {
+  const latest = latestThreadMessage(thread);
+  return {
+    ...publicThreadListItem(thread),
+    subject: latest.subject,
+    messages: thread.messages.map(publicMessageDetail),
   };
 }

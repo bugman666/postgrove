@@ -28,7 +28,6 @@ Open addresses on a domain you own, receive mail at the edge, read it in a web i
 
 - Throwaway / anonymous mailboxes
 - Calendar, contacts, or replacing a full IMAP/SMTP stack
-- Conversation threading (list grouping) — reply headers are set; the thread UI is later
 - Attachments on send
 - Multi-user / RBAC / per-address passwords (one shared `OWNER_TOKEN` until then)
 
@@ -58,7 +57,7 @@ See Issues under milestones `P0-MVP` … `P3-dev-api`. Longer write-ups: [produc
 
 ## Status
 
-P0 inbox on the Worker: list / read / delete against D1, inbound attachments in R2, plus compose/send behind the owner session. Search (LIKE on from / subject / body), unread toggle with a nav count, and star/flag are in. System folders (inbox / sent / drafts / trash / spam) use the existing `messages.folder` column; drafts save and resume on `/compose`. Outbound is pluggable (`stub` / `resend` / `http`). Reply / reply-all / forward prefill compose and send through the same adapters (In-Reply-To / References on reply). Outbound send attachments are a later follow-up. Light-editorial brand art (paper + forest green) lives in [`docs/assets/`](docs/assets/).
+P0 inbox on the Worker: list / read / delete against D1, inbound attachments in R2, plus compose/send behind the owner session. Search (LIKE on from / subject / body), unread toggle with a nav count, and star/flag are in. System folders (inbox / sent / drafts / trash / spam) use the existing `messages.folder` column; drafts save and resume on `/compose`. Outbound is pluggable (`stub` / `resend` / `http`). Reply / reply-all / forward prefill compose and send through the same adapters (In-Reply-To / References on reply). The inbox list groups related mail into basic threads (count on the row; open expands in time order). Outbound send attachments are a later follow-up. Light-editorial brand art (paper + forest green) lives in [`docs/assets/`](docs/assets/).
 
 ## Local development
 
@@ -85,7 +84,7 @@ Seeded addresses:
 
 | Address | What you should see after login |
 |---------|---------------------|
-| `inbox@example.test` | Inbox samples plus one draft, one sent, one trash, and one spam row; includes an attachment and a group thread for reply-all |
+| `inbox@example.test` | Inbox samples plus one draft, one sent, one trash, and one spam row; includes an attachment, a cited reply thread (本周同步), and a subject-fallback pair (办公室钥匙) |
 | `empty@example.test` | Empty-inbox copy |
 
 Direct links (same origin as `wrangler dev`):
@@ -93,7 +92,7 @@ Direct links (same origin as `wrangler dev`):
 - Inbox with mail: [http://127.0.0.1:8787/box/11111111-1111-4111-8111-111111111111](http://127.0.0.1:8787/box/11111111-1111-4111-8111-111111111111)
 - Empty box: [http://127.0.0.1:8787/box/11111111-1111-4111-8111-111111111112](http://127.0.0.1:8787/box/11111111-1111-4111-8111-111111111112)
 
-Open a row to read the body. An unread inbox row becomes read; **标为未读** on the reading pane flips it back and the nav unread count updates. **☆ / ★** stars persist in D1. The list search box matches from, subject, and body with SQL `LIKE` (not FTS5). Filter chips: 全部 / 未读 / 星标. Sidebar folders: 收件箱 / 已发送 / 草稿 / 垃圾箱 / 垃圾邮件. **存草稿** keeps subject and body; opening the draft row restores them. Sending a draft promotes that row to 已发送. Delete moves the row to `trash` (it leaves the current folder and shows under 垃圾箱). **回复** / **全部回复** / **转发** open `/compose` with the original message prefilled. Reply sets `To` to the sender, `Re:` on the subject, and `In-Reply-To` / `References` from the stored Message-ID chain. Reply-all puts the original sender plus original To/Cc in To (deduped, minus this mailbox). Forward uses `Fwd:` and quotes the original headers/body; you still pick the new recipient. The seeded 「本地附件种子」row lists `grove-note.txt`; the owner session can download it from `/attachments/33333333-3333-4333-8333-333333333331`. **写信** is a real form (to / cc / subject / body). With `OUTBOUND_PROVIDER=stub` (the example `.dev.vars`) a submit records the attempt in D1, writes a sent message, and does not leave the box. The welcome seed row is already starred so the 星标 filter has something to show.
+Open a row to read the body. Inbox rows are **threads**: a badge shows how many messages share the conversation. Opening a thread (`/box/:id/t/:threadId`) expands members in `received_at` order. An unread inbox row becomes read; opening a multi-message thread marks every inbox member read. **标为未读** on the reading pane flips one message back and the nav unread count updates. **☆ / ★** stars persist in D1. The list search box matches from, subject, and body with SQL `LIKE` (not FTS5). Filter chips: 全部 / 未读 / 星标. Sidebar folders: 收件箱 / 已发送 / 草稿 / 垃圾箱 / 垃圾邮件. **存草稿** keeps subject and body; opening the draft row restores them. Sending a draft promotes that row to 已发送. Delete moves the row to `trash` (it leaves the current folder and shows under 垃圾箱). **回复** / **全部回复** / **转发** open `/compose` with the original message prefilled. Reply sets `To` to the sender, `Re:` on the subject, and `In-Reply-To` / `References` from the stored Message-ID chain. Reply-all puts the original sender plus original To/Cc in To (deduped, minus this mailbox). Forward uses `Fwd:` and quotes the original headers/body; you still pick the new recipient. The seeded 「本地附件种子」row lists `grove-note.txt`; the owner session can download it from `/attachments/33333333-3333-4333-8333-333333333331`. **写信** is a real form (to / cc / subject / body). With `OUTBOUND_PROVIDER=stub` (the example `.dev.vars`) a submit records the attempt in D1, writes a sent message, and does not leave the box. The welcome seed row is already starred so the 星标 filter has something to show.
 
 JSON against the same seeded rows (cookie from `POST /auth/login`):
 
@@ -104,6 +103,8 @@ curl -sS -b /tmp/pg-cookies http://127.0.0.1:8787/api/mailboxes/11111111-1111-41
 curl -sS -b /tmp/pg-cookies 'http://127.0.0.1:8787/api/mailboxes/11111111-1111-4111-8111-111111111111/messages?folder=sent'
 curl -sS -b /tmp/pg-cookies http://127.0.0.1:8787/api/drafts/22222222-2222-4222-8222-222222222226
 curl -sS -b /tmp/pg-cookies http://127.0.0.1:8787/api/messages/22222222-2222-4222-8222-222222222223
+curl -sS -b /tmp/pg-cookies http://127.0.0.1:8787/api/threads
+curl -sS -b /tmp/pg-cookies http://127.0.0.1:8787/api/threads/mid:seed-sync-root@example.test
 curl -sS -b /tmp/pg-cookies -X DELETE http://127.0.0.1:8787/api/messages/22222222-2222-4222-8222-222222222221
 ```
 
@@ -206,6 +207,24 @@ curl -sS -o /dev/stderr -w '%{http_code}\n' \
 ```
 
 Browser: sign in, use the search box, **未读** in the nav (or the 未读 chip), then **标为未读** / **星标** on a reading pane. Apply `npm run db:migrate:local` so `messages.is_starred` exists.
+
+### Conversation threads
+
+Inbox grouping is **good enough for personal / small-team mail**, not a full Gmail conversation model. No extra D1 column: threads are derived from the current inbox list (same `q` / `filter` as search).
+
+1. **Citation (preferred).** Messages that share `In-Reply-To` / `References` tokens, or whose `rfc_message_id` is cited by another inbox row, become one thread. The stable id is `mid:` plus the root Message-ID (first `References` token, else `In-Reply-To`, else the oldest member's own id), without angle brackets.
+2. **Subject fallback.** Rows with **no** citation headers and **not** cited by anyone else group when the normalized subject **and** the from+to participant pair match. Normalization lowercases the subject and repeatedly strips `Re:` / `Fwd:` / `Fw:` / `Forward:` / `回复:` / `转发:` (ASCII and fullwidth colon). Empty subjects stay singleton so blanks do not collapse into one pile.
+3. **List / open.** `GET /api/threads` is one row per thread with `message_count`. `GET /api/threads/:id` returns members ordered by `received_at` ascending. The HTML list shows the count; `/box/:id/t/:threadId` expands the stack. Sent / drafts / trash / spam stay flat folder lists.
+
+**Fallback caveats (intentional).** Same subject from different people stays separate. A reply that never sets citation headers will not join the cited thread even if the subject matches. MIME `Re[2]:` / folded headers / missing parents that use different ids are out of scope. Re-seed to see 「本周同步」(citation) and 「办公室钥匙」(subject fallback).
+
+```bash
+curl -sS -b /tmp/pg-cookies http://127.0.0.1:8787/api/threads
+curl -sS -b /tmp/pg-cookies http://127.0.0.1:8787/api/threads/mid:seed-sync-root@example.test
+curl -sS -o /dev/stderr -w '%{http_code}\n' http://127.0.0.1:8787/api/threads
+```
+
+The third call (no cookie) should print `401`. Both JSON routes go through `requireOwner`, same as the rest of `/api/*`.
 
 ### Health
 
@@ -360,9 +379,10 @@ Then, in the Cloudflare dashboard, enable Email Routing for your domain and add 
 | `src/attachment-limits.ts` | Size / count caps and human-readable over-limit errors |
 | `src/attachments.ts` | R2 store / owner download / read-view links |
 | `src/mime.ts` | Plain-text body extract + inbound MIME attachments |
-| `src/api.ts` | JSON list / read / delete / send / search / star |
+| `src/api.ts` | JSON list / read / delete / send / search / star / threads |
 | `src/ui.ts` | Inbox HTML + compose / reply / forward form |
 | `src/reply.ts` | Reply / reply-all / forward prefill + header helpers |
+| `src/threads.ts` | Inbox thread grouping (citation, then subject fallback) |
 | `src/triage.ts` | Search `LIKE` helpers + unread / star filters |
 | `src/outbound.ts` | Pluggable outbound adapters (`stub` / `resend` / `http`) |
 | `src/send.ts` | Validate + persist outbound attempts |
