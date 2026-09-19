@@ -63,6 +63,7 @@ Requires Node.js 18.17+ (20+ recommended). No Cloudflare account is needed for t
 
 ```bash
 npm install
+npm run check                    # tsc --noEmit; same command as CI
 cp .dev.vars.example .dev.vars   # local SESSION_SECRET, OWNER_TOKEN, ADMIN_TOKEN
 npm run db:migrate:local
 npm run db:seed:local            # sample mailboxes + messages (local only)
@@ -216,6 +217,10 @@ Then, in the Cloudflare dashboard, enable Email Routing for your domain and add 
 
 MIT. See `LICENSE`.
 
+## CI
+
+GitHub Actions runs `npm run check` (`tsc --noEmit`) on pull requests and `main`. No repository secrets are required.
+
 ## Contributing
 
-Open an Issue before large features. Keep tone practical; this is a real project, not a form submission.
+Open an Issue before large features. Keep tone practical; this is a real project, not a form submission. Run `npm run check` before opening a PR.
