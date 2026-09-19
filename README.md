@@ -2,24 +2,30 @@
 
 Personal and small-team **edge mailbox** on Cloudflare Workers.
 
-Create addresses under your domain, read mail in a clean web inbox, send through a provider you control, and keep attachments in R2. Built for self-hosters who want a focused mailbox without running a full mail server.
+Open addresses on a domain you own, receive mail at the edge, read it in a later web inbox, and keep attachments in R2. Built for self-hosters who do not want to run a full mail server.
 
 > Not affiliated with other Cloudflare mail demos. Educational / self-host use. You are responsible for domain, deliverability, and abuse controls.
 
 ## Why Postgrove
 
-- **Your domain, your rules** — multiple addresses, one Worker deployment
+- **Your domain** — one Worker, several role addresses (`support@`, `billing@`)
 - **Edge-first** — Cloudflare Workers + D1 + R2 + Email Routing
-- **Small surface** — inbox, compose, attachments, admin basics first
+- **Small surface** — create address → receive → read → send
 - **Honest scope** — no fake “enterprise suite”; roadmap stays visible
 
 ## Planned MVP
 
-1. Catch inbound mail (Email Routing → Worker) and store messages in D1
-2. Web inbox (list / read / delete) with responsive layout
-3. Outbound send via a pluggable SMTP/API provider (e.g. Resend or similar)
-4. Attachments in R2 with size limits
-5. Simple auth for mailbox owners + admin
+1. Create one or more addresses on your domain
+2. Receive mail (Email Routing → Worker → D1)
+3. Read in a web inbox (list / open / delete; attachments in R2)
+4. Compose and send through a provider you control (reply later if we keep it)
+5. Failures say what happened and what to do next (auth, missing outbound, routing)
+
+## Out of scope (this milestone)
+
+- Throwaway / anonymous mailboxes
+- Calendar, contacts, or replacing a full IMAP/SMTP stack
+- Inbox chrome and visual tokens (separate issue; this repo’s Worker has no UI yet)
 
 ## Stack (intended)
 
@@ -33,7 +39,7 @@ Create addresses under your domain, read mail in a clean web inbox, send through
 
 ## Status
 
-Worker scaffold: health endpoint, D1 schema, Email Routing stub. Inbox UI and send come later.
+Worker scaffold only: health endpoint, D1 schema, Email Routing stub. No inbox UI in this step.
 
 ## Local development
 
@@ -76,7 +82,7 @@ Hello from a local inbound test.
 '
 ```
 
-The stub only accepts recipients that already exist in `mailboxes` (create address first; unknown and disabled addresses are rejected). After the local seed, `inbox@example.test` is available. Check Wrangler logs for `inbound stub: stored`. Inspect rows with:
+Create the address first, then receive. The stub rejects unknown and disabled recipients (no catch-all, no anonymous boxes). After `npm run db:seed:local`, `inbox@example.test` is available. Check Wrangler logs for `inbound stub: stored`. Inspect rows with:
 
 ```bash
 npx wrangler d1 execute postgrove --local --command \

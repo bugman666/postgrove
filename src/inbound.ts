@@ -11,11 +11,6 @@ export async function handleInbound(message: InboundEmail, env: Env): Promise<vo
     return;
   }
 
-  const now = Date.now();
-  const subject = header(message.headers, "subject");
-  const rfcMessageId = header(message.headers, "message-id");
-  const snippet = await snippetFromRaw(message.raw);
-
   const mailbox = await env.DB.prepare(
     `SELECT id, status FROM mailboxes WHERE address = ?1`,
   )
@@ -23,14 +18,20 @@ export async function handleInbound(message: InboundEmail, env: Env): Promise<vo
     .first<{ id: string; status: string }>();
 
   if (!mailbox) {
+    console.log("inbound stub: unknown mailbox", { to: parsedTo.address });
     message.setReject("unknown mailbox");
     return;
   }
   if (mailbox.status !== "active") {
+    console.log("inbound stub: mailbox disabled", { to: parsedTo.address });
     message.setReject("mailbox disabled");
     return;
   }
 
+  const now = Date.now();
+  const subject = header(message.headers, "subject");
+  const rfcMessageId = header(message.headers, "message-id");
+  const snippet = await snippetFromRaw(message.raw);
   const mailboxId = mailbox.id;
 
   const messageId = crypto.randomUUID();

@@ -18,14 +18,19 @@ export async function handleHealth(env: Env): Promise<Response> {
     const missing = REQUIRED_TABLES.filter((name) => !present.has(name));
     const ready = missing.length === 0;
 
+    if (ready) {
+      return json({ ok: true, service: "postgrove", db: "ready", missing }, 200, headers);
+    }
+
     return json(
       {
-        ok: ready,
+        ok: false,
         service: "postgrove",
-        db: ready ? "ready" : "migrations_pending",
+        db: "migrations_pending",
         missing,
+        hint: "Apply D1 migrations (npm run db:migrate:local), then retry.",
       },
-      ready ? 200 : 503,
+      503,
       headers,
     );
   } catch (error) {
@@ -36,6 +41,7 @@ export async function handleHealth(env: Env): Promise<Response> {
         service: "postgrove",
         db: "error",
         error: detail,
+        hint: "Check the D1 binding and that the local database is reachable.",
       },
       503,
       headers,
