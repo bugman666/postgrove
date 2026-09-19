@@ -1,4 +1,5 @@
 import type { Env } from "./env";
+import { describeAuthMode } from "./users.ts";
 
 const REQUIRED_TABLES = [
   "mailboxes",
@@ -29,7 +30,17 @@ export async function handleHealth(env: Env): Promise<Response> {
     const ready = missing.length === 0;
 
     if (ready) {
-      return json({ ok: true, service: "postgrove", db: "ready", missing }, 200, headers);
+      const authMode = await describeAuthMode(env);
+      const body: Record<string, unknown> = {
+        ok: true,
+        service: "postgrove",
+        db: "ready",
+        missing,
+      };
+      if (authMode) {
+        body.auth_mode = authMode;
+      }
+      return json(body, 200, headers);
     }
 
     return json(

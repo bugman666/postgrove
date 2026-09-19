@@ -18,17 +18,26 @@
 # Production: `npx wrangler secret put SESSION_SECRET` (and OWNER_TOKEN, ADMIN_TOKEN,
 # plus RESEND_API_KEY when OUTBOUND_PROVIDER=resend).
 # Do not reuse these placeholders remotely.
+# Runbook: docs/PRODUCTION_AUTH.md
 #
 # OWNER_TOKEN is one shared secret for every mailbox — not a per-address password.
-# Anyone who has it can open any active address (break-glass / deploy owner).
-# Production: prefer member tokens + admin (POST /admin/users) for day-to-day
-# login; keep OWNER_TOKEN for recovery, not a shared operator password.
-# Mailbox members use their own token (issued on POST /admin/users).
+# Anyone who has it can open any active address. It is break-glass / deploy owner
+# only. Production day-to-day: member tokens + admin (POST /admin/users), not a
+# shared operator password. Members get their own token (shown once).
 # ADMIN_TOKEN (or an admin-role member session) opens /admin.
+# GET /healthz and /admin/ping may include auth_mode=owner_break_glass when the
+# users table has no members (non-breaking hint).
 #
-# SESSION_SECRET signs the owner cookie. Sessions are stateless HMAC tokens: logout
-# only clears the browser cookie. Rotate SESSION_SECRET (and restart / redeploy)
-# to revoke every owner session at once.
+# Rotate / revoke (sessions are stateless HMAC — logout only clears that browser):
+#   SESSION_SECRET  — put a new value and redeploy to drop every cookie.
+#                     Also re-rotate inbound hook secrets (envelopes use this key).
+#   OWNER_TOKEN     — new value + redeploy. Does not drop cookies; rotate
+#                     SESSION_SECRET too if the owner token leaked.
+#   ADMIN_TOKEN     — same as OWNER_TOKEN. Rotate SESSION_SECRET if an admin
+#                     cookie may have been copied.
+#   Member token    — mint a replacement; disable the user to stop the next
+#                     request. Rotate SESSION_SECRET to drop an issued cookie.
+#   REST pg_ token  — mint a new hash row; delete the old one.
 #
 # POST /auth/login is limited to 8 attempts per 10 minutes per IP (in-memory,
 # per Worker isolate). A 429 includes a human-readable hint and Retry-After.
@@ -58,10 +67,14 @@ OUTBOUND_PROVIDER=stub
 # Alternative: OUTBOUND_PROVIDER=http
 # POST JSON { from, to, subject, text } to this URL.
 # OUTBOUND_HTTP_URL is operator-trusted only (env / wrangler secret).
-# Do not accept it from the UI. If a settings field is ever added, it must
-# go through validateSafeUrl (same as inbound webhook / forward URLs).
+# Do not accept it from the UI. The http adapter does not run validateSafeUrl
+# on this env value (trusted private hooks must keep working).
+# If a Settings field lands, call assertOutboundHttpUrl(raw) before save.
+# Optional: OUTBOUND_HTTP_STRICT=1 fails loud at adapter resolve when the
+# env URL is localhost / metadata / RFC1918. Default off.
 # OUTBOUND_HTTP_URL=
 # OUTBOUND_HTTP_TOKEN=
+# OUTBOUND_HTTP_STRICT=0
 
 # Optional From override for any provider (wins over RESEND_FROM).
 # OUTBOUND_FROM=

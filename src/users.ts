@@ -86,6 +86,26 @@ export async function listUsers(env: Env): Promise<UserRecord[]> {
   return rows.results ?? [];
 }
 
+/** Production smoke: day-to-day login is still the shared OWNER_TOKEN. */
+export type AuthModeHint = "owner_break_glass" | "members";
+
+/**
+ * Count users-table members for the /healthz and /admin/ping auth_mode hint.
+ * Returns null when the table cannot be read so those routes stay non-breaking.
+ */
+export async function describeAuthMode(env: Env): Promise<AuthModeHint | null> {
+  try {
+    const row = await env.DB.prepare(`SELECT COUNT(*) AS n FROM users`).first<{ n: number }>();
+    const n = Number(row?.n ?? 0);
+    if (!Number.isFinite(n)) {
+      return null;
+    }
+    return n > 0 ? "members" : "owner_break_glass";
+  } catch {
+    return null;
+  }
+}
+
 export async function getUser(env: Env, idOrLogin: string): Promise<UserRecord | null> {
   const key = idOrLogin.trim();
   if (!key) {

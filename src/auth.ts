@@ -1,6 +1,6 @@
 import { findApiTokenByHash, hashApiToken, looksLikeApiToken } from "./api-tokens.ts";
 import type { Env } from "./env";
-import { findUserByMailboxToken, getUser, listUserMailboxIds } from "./users.ts";
+import { describeAuthMode, findUserByMailboxToken, getUser, listUserMailboxIds } from "./users.ts";
 
 /** Cookie Inbox and other Worker routes should send after owner login. */
 export const OWNER_SESSION_COOKIE = "postgrove_session";
@@ -76,7 +76,8 @@ interface SessionPayload {
  *
  * Owner: POST /auth/login { address, token: OWNER_TOKEN } → HttpOnly cookie.
  * OWNER_TOKEN is one shared secret for every mailbox (not a per-address password).
- * Mailbox user: same JSON, but token is that member's token (users table).
+ * Production: prefer member tokens + admin; OWNER_TOKEN is break-glass only
+ * (docs/PRODUCTION_AUTH.md). Mailbox user: same JSON, member token (users table).
  * Inbox calls `requireOwner` and returns `result.response` when `ok` is false.
  *
  * Admin: Authorization: Bearer <ADMIN_TOKEN>, or admin-role session cookie,
@@ -611,7 +612,16 @@ async function handleAdminPing(request: Request, env: Env): Promise<Response> {
   if (!result.ok) {
     return result.response;
   }
-  return json({ ok: true, role: "admin", source: result.principal.source });
+  const authMode = await describeAuthMode(env);
+  const body: Record<string, unknown> = {
+    ok: true,
+    role: "admin",
+    source: result.principal.source,
+  };
+  if (authMode) {
+    body.auth_mode = authMode;
+  }
+  return json(body);
 }
 
 async function handleAdminSession(request: Request, env: Env): Promise<Response> {
