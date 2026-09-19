@@ -116,9 +116,47 @@ test("GET /admin/ping with admin bearer succeeds", async () => {
   );
   assert.ok(response);
   assert.equal(response.status, 200);
-  const body = (await response.json()) as { ok: boolean; role: string };
+  const body = (await response.json()) as { ok: boolean; role: string; auth_mode?: string };
   assert.equal(body.ok, true);
   assert.equal(body.role, "admin");
+  // fakeDb has no users COUNT — omit auth_mode rather than break ping.
+  assert.equal(body.auth_mode, undefined);
+});
+
+test("GET /admin/ping includes auth_mode when users can be counted", async () => {
+  const counted = env();
+  counted.DB = {
+    prepare(sql: string) {
+      if (typeof sql === "string" && sql.includes("FROM users") && sql.includes("COUNT")) {
+        return {
+          async first() {
+            return { n: 0 };
+          },
+        };
+      }
+      return {
+        bind() {
+          return {
+            async first() {
+              return { id: MAILBOX.id, address: MAILBOX.address, status: "active" };
+            },
+          };
+        },
+      };
+    },
+  } as unknown as D1Database;
+
+  const response = await handleAuthRoutes(
+    new Request("http://127.0.0.1:8787/admin/ping", {
+      headers: { authorization: `Bearer ${ADMIN}` },
+    }),
+    counted,
+  );
+  assert.ok(response);
+  assert.equal(response.status, 200);
+  const body = (await response.json()) as { ok: boolean; auth_mode?: string };
+  assert.equal(body.ok, true);
+  assert.equal(body.auth_mode, "owner_break_glass");
 });
 
 test("login issues a session cookie for an active mailbox", async () => {

@@ -1,4 +1,5 @@
 import type { Env } from "./env";
+import { validateSafeUrl, type ValidateSafeUrlResult } from "./safe-url.ts";
 
 export const OUTBOUND_PROVIDERS = ["stub", "resend", "http"] as const;
 export type OutboundProviderName = (typeof OUTBOUND_PROVIDERS)[number];
@@ -201,6 +202,35 @@ function normalizeOptionalId(raw: unknown): string | null {
 const RESEND_ENDPOINT = "https://api.resend.com/emails";
 
 /**
+ * Gate for a Settings/UI-supplied outbound HTTP hook URL.
+ *
+ * There is no UI save path today. Call this **before persist** if one lands
+ * (same default-deny policy as inbound webhook / forward / logo).
+ *
+ * Deploy-time `OUTBOUND_HTTP_URL` is operator-trusted and is not passed
+ * through this helper unless `OUTBOUND_HTTP_STRICT=1` at adapter resolve.
+ */
+export function assertOutboundHttpUrl(raw: string): ValidateSafeUrlResult {
+  const checked = validateSafeUrl(typeof raw === "string" ? raw.trim() : raw);
+  if (!checked.ok) {
+    const extra =
+      checked.error === "blocked_destination"
+        ? " Internal, metadata, loopback, RFC1918, link-local, CGNAT, and *.localhost targets are blocked."
+        : "";
+    return {
+      ok: false,
+      error: checked.error,
+      hint: `Outbound HTTP URL rejected: ${checked.hint}${extra} Call assertOutboundHttpUrl before save if a Settings field lands.`,
+    };
+  }
+  return checked;
+}
+
+export function outboundHttpStrictEnabled(env: Env): boolean {
+  return (env.OUTBOUND_HTTP_STRICT ?? "").trim() === "1";
+}
+
+/**
  * Pick the outbound adapter from env. Unset / incomplete real providers
  * fail closed with a next-step hint — never a silent drop.
  */
@@ -229,7 +259,10 @@ export function resolveOutboundAdapter(env: Env): AdapterResolve {
   }
   if (name === "http") {
     // Operator-trusted deploy hook (env / wrangler secret). Not a UI field.
-    // If this is ever accepted from settings, run validateSafeUrl first.
+    // Do not wrap in validateSafeUrl by default — private operator hooks
+    // must keep working. If a Settings field lands, call
+    // assertOutboundHttpUrl before save. Optional OUTBOUND_HTTP_STRICT=1
+    // fails loud here when the env URL is an obvious SSRF target.
     const url = env.OUTBOUND_HTTP_URL?.trim() ?? "";
     if (!url) {
       return {
@@ -254,6 +287,16 @@ export function resolveOutboundAdapter(env: Env): AdapterResolve {
         error: "outbound_not_configured",
         hint: "OUTBOUND_HTTP_URL must start with https:// (or http:// for local hooks).",
       };
+    }
+    if (outboundHttpStrictEnabled(env)) {
+      const gated = assertOutboundHttpUrl(url);
+      if (!gated.ok) {
+        return {
+          ok: false,
+          error: "outbound_url_blocked",
+          hint: `OUTBOUND_HTTP_STRICT=1: ${gated.hint} Unset OUTBOUND_HTTP_STRICT to keep a trusted private hook.`,
+        };
+      }
     }
     return {
       ok: true,

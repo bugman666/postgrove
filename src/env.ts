@@ -4,7 +4,11 @@ export interface Env {
   ATTACHMENTS?: R2Bucket;
   /** HMAC secret for owner session cookies. Rotate to revoke all sessions. */
   SESSION_SECRET?: string;
-  /** Shared secret for every mailbox (not a per-address password). */
+  /**
+   * Shared secret for every mailbox (not a per-address password).
+   * Production: break-glass only — prefer member tokens + admin
+   * (docs/PRODUCTION_AUTH.md).
+   */
   OWNER_TOKEN?: string;
   /** Bearer token for /admin/* (Authorization: Bearer …). */
   ADMIN_TOKEN?: string;
@@ -14,10 +18,20 @@ export interface Env {
   RESEND_API_KEY?: string;
   /** Optional From override for Resend (verified domain). */
   RESEND_FROM?: string;
-  /** Required when OUTBOUND_PROVIDER=http. POST JSON {from,to,subject,text} plus optional cc/headers. */
+  /**
+   * Required when OUTBOUND_PROVIDER=http. POST JSON {from,to,subject,text}
+   * plus optional cc/headers. Operator-trusted env / wrangler secret only —
+   * not a Settings field. Do not run validateSafeUrl on it by default.
+   */
   OUTBOUND_HTTP_URL?: string;
   /** Optional Bearer token for the HTTP outbound hook. */
   OUTBOUND_HTTP_TOKEN?: string;
+  /**
+   * When "1", resolveOutboundAdapter rejects OUTBOUND_HTTP_URL that points
+   * at localhost / metadata / RFC1918 (via assertOutboundHttpUrl). Default
+   * off so trusted private operator hooks keep working.
+   */
+  OUTBOUND_HTTP_STRICT?: string;
   /** Optional From override for any provider (wins over RESEND_FROM). */
   OUTBOUND_FROM?: string;
   /** Per-attachment size cap in bytes (default 10485760 = 10 MiB). */

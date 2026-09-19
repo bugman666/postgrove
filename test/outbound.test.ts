@@ -7,7 +7,9 @@ import {
   signOwnerSession,
 } from "../src/auth.ts";
 import {
+  assertOutboundHttpUrl,
   HttpAdapter,
+  outboundHttpStrictEnabled,
   parseSendFields,
   ResendAdapter,
   resolveOutboundAdapter,
@@ -53,6 +55,86 @@ test("resolveOutboundAdapter: http without URL fails loud", () => {
   assert.equal(resolved.ok, false);
   if (!resolved.ok) {
     assert.match(resolved.hint, /OUTBOUND_HTTP_URL/);
+  }
+});
+
+test("assertOutboundHttpUrl allows public http(s) and blocks SSRF targets", () => {
+  const ok = assertOutboundHttpUrl("https://hooks.example.test/send");
+  assert.equal(ok.ok, true);
+  if (ok.ok) {
+    assert.equal(ok.url.hostname, "hooks.example.test");
+  }
+
+  for (const raw of [
+    "http://127.0.0.1:8080/send",
+    "http://localhost/hook",
+    "http://10.0.0.9/hook",
+    "http://192.168.1.8/hook",
+    "http://169.254.169.254/latest/meta-data/",
+    "http://metadata.google.internal/",
+    "ftp://example.org/send",
+    "",
+  ]) {
+    const blocked = assertOutboundHttpUrl(raw);
+    assert.equal(blocked.ok, false, raw);
+    if (!blocked.ok) {
+      assert.match(blocked.hint, /Outbound HTTP URL rejected|absolute http/i);
+      assert.match(blocked.hint, /assertOutboundHttpUrl before save/);
+    }
+  }
+});
+
+test("OUTBOUND_HTTP_STRICT default off keeps a trusted private hook", () => {
+  assert.equal(outboundHttpStrictEnabled(env()), false);
+  assert.equal(outboundHttpStrictEnabled(env({ OUTBOUND_HTTP_STRICT: "0" })), false);
+  assert.equal(outboundHttpStrictEnabled(env({ OUTBOUND_HTTP_STRICT: "1" })), true);
+
+  const privateHook = resolveOutboundAdapter(
+    env({
+      OUTBOUND_PROVIDER: "http",
+      OUTBOUND_HTTP_URL: "http://127.0.0.1:8788/send",
+    }),
+  );
+  assert.equal(privateHook.ok, true);
+  if (privateHook.ok) {
+    assert.equal(privateHook.adapter.name, "http");
+  }
+});
+
+test("OUTBOUND_HTTP_STRICT=1 fails loud on localhost / metadata / RFC1918", () => {
+  for (const url of [
+    "http://127.0.0.1:8788/send",
+    "http://localhost/hook",
+    "http://10.1.2.3/hook",
+    "http://192.168.0.9/hook",
+    "http://169.254.169.254/latest/meta-data/",
+    "http://metadata.google.internal/",
+  ]) {
+    const resolved = resolveOutboundAdapter(
+      env({
+        OUTBOUND_PROVIDER: "http",
+        OUTBOUND_HTTP_URL: url,
+        OUTBOUND_HTTP_STRICT: "1",
+      }),
+    );
+    assert.equal(resolved.ok, false, url);
+    if (!resolved.ok) {
+      assert.equal(resolved.error, "outbound_url_blocked");
+      assert.match(resolved.hint, /OUTBOUND_HTTP_STRICT=1/);
+      assert.match(resolved.hint, /Unset OUTBOUND_HTTP_STRICT/);
+    }
+  }
+
+  const publicOk = resolveOutboundAdapter(
+    env({
+      OUTBOUND_PROVIDER: "http",
+      OUTBOUND_HTTP_URL: "https://hooks.example.test/send",
+      OUTBOUND_HTTP_STRICT: "1",
+    }),
+  );
+  assert.equal(publicOk.ok, true);
+  if (publicOk.ok) {
+    assert.equal(publicOk.adapter.name, "http");
   }
 });
 

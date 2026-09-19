@@ -236,9 +236,9 @@ The third call (no cookie) should print `401`. Both JSON routes go through `requ
 curl -sS http://127.0.0.1:8787/healthz
 ```
 
-Expect JSON with `"ok": true` and `"db": "ready"` after migrations. A `503` with `"migrations_pending"` means the local D1 schema has not been applied.
+Expect JSON with `"ok": true` and `"db": "ready"` after migrations. A `503` with `"migrations_pending"` means the local D1 schema has not been applied. When the `users` table can be counted, the body also includes `auth_mode`: `"owner_break_glass"` if there are no members (day-to-day login is still the shared `OWNER_TOKEN`), or `"members"` if at least one users-table row exists. The field is omitted if the count cannot run — status stays 200/503 as before.
 
-`GET /healthz` stays public (no session). After this milestone it also expects `outbound_attempts`, `api_tokens`, `users`, `inbound_hooks`, `inbound_deliveries`, and `dev_inboxes` (`npm run db:migrate:local`). The Email Routing handler is also unauthenticated — Cloudflare calls it, not a browser.
+`GET /healthz` stays public (no session). After this milestone it also expects `outbound_attempts`, `api_tokens`, `users`, `inbound_hooks`, `inbound_deliveries`, and `dev_inboxes` (`npm run db:migrate:local`). The Email Routing handler is also unauthenticated — Cloudflare calls it, not a browser. Production auth runbook: [docs/PRODUCTION_AUTH.md](docs/PRODUCTION_AUTH.md).
 
 ### Compose and outbound
 
@@ -251,8 +251,9 @@ Local example uses `OUTBOUND_PROVIDER=stub`: the adapter records the attempt and
 | `OUTBOUND_PROVIDER` | `stub` · `resend` · `http`. Unset → send fails with an actionable hint |
 | `RESEND_API_KEY` | Required for `resend` |
 | `RESEND_FROM` | Optional From override (verified domain) |
-| `OUTBOUND_HTTP_URL` | Required for `http` (POST JSON `{from,to,subject,text}`; optional `cc`, `headers`, `in_reply_to`, `references`). **Operator-trusted only** — set in `.dev.vars` / `wrangler secret put`, never accept this URL from the UI. If a settings field is ever added, it must go through `validateSafeUrl`. |
+| `OUTBOUND_HTTP_URL` | Required for `http` (POST JSON `{from,to,subject,text}`; optional `cc`, `headers`, `in_reply_to`, `references`). **Operator-trusted env only** — set in `.dev.vars` / `wrangler secret put`. Never accept this URL from the UI. The adapter does **not** run `validateSafeUrl` on it by default (trusted private hooks must keep working). If a Settings field lands, call `assertOutboundHttpUrl` before save. |
 | `OUTBOUND_HTTP_TOKEN` | Optional Bearer for the HTTP hook |
+| `OUTBOUND_HTTP_STRICT` | Optional. `1` fails loud at adapter resolve when `OUTBOUND_HTTP_URL` is localhost / metadata / RFC1918. Default **off**. |
 | `OUTBOUND_FROM` | Optional From override for any provider |
 
 ```bash
@@ -281,7 +282,9 @@ Inbound webhook / forward **save**, **fetch**, and **each redirect hop** call `v
 
 Default policy on this path: **https only**. `http://127.0.0.1` (and other private http) is allowed only when `ALLOW_PRIVATE_WEBHOOKS=1`. Public `http` is rejected at the webhook layer even though `validateSafeUrl` itself allows it. A bad config URL returns **400** with a clear hint (`blocked_destination` / `invalid_url`).
 
-`OUTBOUND_HTTP_URL` is **not** an operator-supplied UI field. It is a deploy-time hook the operator already trusts. The `http` adapter does not run `validateSafeUrl` on it. Do not expose it in settings; if you ever do, gate it with `validateSafeUrl` (and the DNS re-check) the same way as webhooks.
+`OUTBOUND_HTTP_URL` is **not** an operator-supplied UI field. It is a deploy-time hook the operator already trusts. The `http` adapter does **not** run `validateSafeUrl` on it by default — blindly wrapping the env value would break trusted private hooks (RFC1918 / localhost sidecars). Do not expose it in Settings.
+
+`assertOutboundHttpUrl(raw)` in `src/outbound.ts` is the save-time gate for a future Settings field. There is no UI path today; **call it before persist if one lands** (it wraps `validateSafeUrl`). Optional `OUTBOUND_HTTP_STRICT=1` uses the same helper at adapter resolve so an obvious SSRF env URL fails loud; leave it unset so current operator hooks keep working. See [docs/PRODUCTION_AUTH.md](docs/PRODUCTION_AUTH.md).
 
 Workers `fetch` cannot install a custom dialer (no restricted `DialContext`). Residual DNS-rebinding risk remains if the resolver is skipped.
 
@@ -352,7 +355,7 @@ Design: **owner = signed HttpOnly session cookie** after `POST /auth/login`. **A
 | **Admin** | `Authorization: Bearer <ADMIN_TOKEN>`, `POST /admin/session`, or a `users.role=admin` member session | List/create/disable members, open addresses, read-only mail audit. Admin users skip per-user quotas (`0` = unlimited). |
 | **Mailbox user** | `POST /auth/login` with a bound address + that member's token | Only mailboxes listed in `user_mailboxes`. Creating addresses / storing inbound / sending are quota-checked. |
 
-**Shared `OWNER_TOKEN` vs member tokens.** `OWNER_TOKEN` is still one shared secret for every mailbox — not a per-address password. Treat it like a deploy / break-glass secret. **Production should prefer member tokens + admin** (`POST /admin/users`, admin-role member or `ADMIN_TOKEN`) for day-to-day login; keep `OWNER_TOKEN` for recovery, not shared operator sign-in. Members get their own token from `POST /admin/users` (returned once). A disabled member cannot keep using an old cookie (`user_disabled`).
+**Shared `OWNER_TOKEN` vs member tokens.** `OWNER_TOKEN` is still one shared secret for every mailbox — not a per-address password. Treat it like a deploy / **break-glass** secret. **Production should prefer member tokens + admin** (`POST /admin/users`, admin-role member or `ADMIN_TOKEN`) for day-to-day login; keep `OWNER_TOKEN` for recovery, not shared operator sign-in. Members get their own token from `POST /admin/users` (returned once). A disabled member cannot keep using an old cookie (`user_disabled`). Operator runbook (rotate / revoke, outbound URL gate): [docs/PRODUCTION_AUTH.md](docs/PRODUCTION_AUTH.md).
 
 Copy `.dev.vars.example` to `.dev.vars` (gitignored). The example values work locally; change them before any remote deploy and set the same names with `npx wrangler secret put`.
 
@@ -384,7 +387,17 @@ curl -i -c /tmp/pg-cookies -X POST http://127.0.0.1:8787/auth/logout
 
 **Login rate limit.** `POST /auth/login` allows **8 attempts per 10 minutes per IP** (`CF-Connecting-IP`, else the first `X-Forwarded-For` hop). Over the limit returns **429** with `Retry-After` and a hint such as “Too many login attempts from this network…”. Counters live in Worker memory **per isolate**, so a new isolate starts a fresh window. That residual is accepted for a single-operator box. A shared Durable Object / KV limiter is a follow-up if you run many isolates; it is not required for v0.1.
 
-**Rotate `SESSION_SECRET` to revoke sessions.** Logout only deletes the cookie in that browser. Tokens are HMAC-signed and are not stored on the server, so they stay valid until expiry (7 days) if someone copied the cookie. To revoke every owner session: put a new `SESSION_SECRET` (`npx wrangler secret put SESSION_SECRET`, or edit `.dev.vars` locally) and redeploy / restart Wrangler. Old cookies fail verify. `OWNER_TOKEN` / `ADMIN_TOKEN` do not rotate sessions; change those when the secret leaked, then rotate `SESSION_SECRET` as well.
+**Rotate / revoke.** Logout only deletes the cookie in that browser. Tokens are HMAC-signed and are not stored on the server, so they stay valid until expiry (7 days) if someone copied the cookie.
+
+| Secret | Revoke |
+|--------|--------|
+| `SESSION_SECRET` | Put a new value and redeploy / restart Wrangler. Old cookies fail verify. Re-rotate inbound hook secrets (envelopes use this key). |
+| `OWNER_TOKEN` | New value + redeploy. Does **not** drop cookies — rotate `SESSION_SECRET` too if the owner token leaked. Break-glass only in production. |
+| `ADMIN_TOKEN` | Same as owner token. Rotate `SESSION_SECRET` if an admin cookie may have been copied. |
+| Member token | Mint a replacement (`POST /admin/users` / 值守台). Disable the member to stop the next request; rotate `SESSION_SECRET` to drop an issued cookie. |
+| REST `pg_…` | Mint a new hash row; delete the old one. |
+
+Full table: [docs/PRODUCTION_AUTH.md](docs/PRODUCTION_AUTH.md).
 
 **CSRF (cookie + SameSite=Lax + Origin check).** The session cookie is `HttpOnly`, `SameSite=Lax`, and `Secure` on HTTPS. Cross-site form POSTs therefore do not send it on modern browsers. Cookie-authenticated writes (`POST /auth/logout`, inbox delete, `POST /compose`, `POST /api/send`, `DELETE /api/messages/…`, anything else that calls `requireOwner` with POST/PUT/PATCH/DELETE) also require `Origin` (or `Referer` if `Origin` is missing) to match this Worker. Same-origin HTML forms and `fetch` already send `Origin`, so the inbox and compose UI did not need a rewrite. Missing both headers is allowed for curl and scripts. That is enough for this MVP.
 
@@ -411,7 +424,7 @@ curl -sS -H 'Authorization: Bearer change-me-local-admin-token' \
   http://127.0.0.1:8787/admin/branding
 ```
 
-Expect `"role": "admin"` on ping. A missing bearer/cookie returns **401**. A mailbox/owner session on `/admin/users` returns **403**. Admin bearer is not a cookie, so browser CSRF does not apply the same way; cookie admin writes still check Origin. A leaked `ADMIN_TOKEN` means rotate now.
+Expect `"role": "admin"` on ping. When the `users` table can be counted, ping also includes `auth_mode` (`owner_break_glass` or `members`) — same hint as `/healthz`, non-breaking. A missing bearer/cookie returns **401**. A mailbox/owner session on `/admin/users` returns **403**. Admin bearer is not a cookie, so browser CSRF does not apply the same way; cookie admin writes still check Origin. A leaked `ADMIN_TOKEN` means rotate now.
 
 Browser: [http://127.0.0.1:8787/admin](http://127.0.0.1:8787/admin) is the 值守台 (paper + forest, not an Element admin clone). Paste `ADMIN_TOKEN` or sign in as an admin-role member.
 
@@ -640,8 +653,9 @@ npm run db:migrate:remote
 npx wrangler r2 bucket create postgrove-attachments
 # confirm wrangler.jsonc r2_buckets.bucket_name matches
 npx wrangler secret put SESSION_SECRET
-npx wrangler secret put OWNER_TOKEN
+npx wrangler secret put OWNER_TOKEN   # break-glass only; prefer POST /admin/users
 npx wrangler secret put ADMIN_TOKEN
+# then create mailbox members — see docs/PRODUCTION_AUTH.md
 # optional public signup (off until both are set):
 # npx wrangler secret put TURNSTILE_SECRET_KEY
 # npx wrangler secret put TURNSTILE_SITE_KEY
@@ -683,8 +697,9 @@ Then, in the Cloudflare dashboard, enable Email Routing for your domain and add 
 | `src/reply.ts` | Reply / reply-all / forward prefill + header helpers |
 | `src/threads.ts` | Inbox thread grouping (citation, then subject fallback) |
 | `src/triage.ts` | Search `LIKE` helpers + unread / star filters |
-| `src/outbound.ts` | Pluggable outbound adapters (`stub` / `resend` / `http`) |
+| `src/outbound.ts` | Pluggable outbound adapters (`stub` / `resend` / `http`); `assertOutboundHttpUrl` for a future Settings save |
 | `src/safe-url.ts` | SSRF guard + shared `recheckResolvedIps` (webhooks / forward / logo) |
+| `docs/PRODUCTION_AUTH.md` | Production: member+admin default; `OWNER_TOKEN` break-glass; rotate/revoke; outbound URL gate |
 | `src/webhooks.ts` | Inbound signed webhook + forward; secret enveloped at rest; `validateSafeUrl` on save/fetch/redirect |
 | `src/send.ts` | Validate + persist outbound attempts |
 | `migrations/0001_init.sql` | D1 `mailboxes` + `messages` |
