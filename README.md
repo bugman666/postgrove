@@ -49,7 +49,7 @@ Capability ideas drawn from mainstream mail UX (e.g. Gmail), Cloudflare edge mai
 | **P2** | Platform | Multi-user + RBAC/quotas, inbound webhooks/forward, open REST + abuse controls, light analytics, i18n, soft branding |
 | **P3** | Dev API (own domain) | Wait-for-message / OTP helpers, `+` aliases, API keys & quotas — **not** multi-provider disposable mail hubs |
 
-See Issues under milestones `P0-MVP` … `P3-dev-api`.
+See Issues under milestones `P0-MVP` … `P3-dev-api`. Longer write-ups: [product brief](docs/PRODUCT_BRIEF_v0.md), [roadmap](docs/ROADMAP.md), [visual system](docs/VISUAL_SYSTEM_v0.md).
 
 ## Status
 
