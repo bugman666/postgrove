@@ -81,3 +81,7 @@ ATTACHMENT_MAX_COUNT=10
 # SIGNUP_RATE_LIMIT_MAX=5
 # SIGNUP_RATE_LIMIT_WINDOW_MS=600000
 # REST_BODY_MAX_BYTES=256000
+#
+# Inbound webhooks / forward (#11). Default: https only; validateSafeUrl on
+# save, fetch, and each redirect. Set to 1 for local http://127.0.0.1 hooks.
+# ALLOW_PRIVATE_WEBHOOKS=0

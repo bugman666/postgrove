@@ -1,8 +1,9 @@
-import type { Env, InboundEmail } from "./env";
-import { inboundAttachmentRejection } from "./attachment-limits";
-import { persistInboundAttachments } from "./attachments";
-import { extractAttachments, extractBodies } from "./mime";
+import type { Env, InboundEmail } from "./env.ts";
+import { inboundAttachmentRejection } from "./attachment-limits.ts";
+import { persistInboundAttachments } from "./attachments.ts";
+import { extractAttachments, extractBodies } from "./mime.ts";
 import { inboundStorageRejection } from "./quotas.ts";
+import { notifyInbound } from "./webhooks.ts";
 
 export async function handleInbound(message: InboundEmail, env: Env): Promise<void> {
   let parsedTo: AddressParts;
@@ -128,6 +129,23 @@ export async function handleInbound(message: InboundEmail, env: Env): Promise<vo
     sizeBytes: message.rawSize,
     attachments: files.length,
   });
+
+  try {
+    await notifyInbound(env, {
+      mailboxId,
+      mailboxAddress: parsedTo.address,
+      messageId,
+      from: message.from,
+      to: parsedTo.address,
+      subject,
+      snippet,
+      text: bodyText,
+      receivedAt: now,
+    });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "unknown";
+    console.log("inbound stub: webhook/forward notify failed", { messageId, detail });
+  }
 }
 
 interface AddressParts {

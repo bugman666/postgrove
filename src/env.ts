@@ -34,6 +34,11 @@ export interface Env {
   REST_RATE_LIMIT_MAX?: string;
   /** Token API window in ms (default 60000). */
   REST_RATE_LIMIT_WINDOW_MS?: string;
+  /**
+   * When "1", webhook/forward save + fetch may target private / loopback http
+   * (e.g. http://127.0.0.1). Passed to validateSafeUrl as allowPrivate.
+   */
+  ALLOW_PRIVATE_WEBHOOKS?: string;
   /** Public signup attempts per window (default 5). */
   SIGNUP_RATE_LIMIT_MAX?: string;
   /** Public signup window in ms (default 600000). */

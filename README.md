@@ -50,14 +50,14 @@ Capability ideas drawn from mainstream mail UX (e.g. Gmail), Cloudflare edge mai
 |-------|--------|------------|
 | **P0 MVP** | Edge mailbox core | Inbound → D1, web inbox, compose/send, R2 attachments, simple auth |
 | **P1** | Mailbox completeness | Reply / reply-all / forward, folders + drafts + sent, search / unread / star, basic threads |
-| **P2** | Platform | Multi-user + RBAC/quotas, inbound webhooks/forward, open REST + abuse controls, light analytics, i18n, soft branding |
+| **P2** | Platform | Multi-user + RBAC/quotas, inbound webhooks/forward (signed HMAC + delivery log), open REST + abuse controls, light analytics, i18n, soft branding |
 | **P3** | Dev API (own domain) | Wait-for-message / OTP helpers, `+` aliases, API keys & quotas — **not** multi-provider disposable mail hubs |
 
 See Issues under milestones `P0-MVP` … `P3-dev-api`. Longer write-ups: [product brief](docs/PRODUCT_BRIEF_v0.md), [roadmap](docs/ROADMAP.md), [visual system](docs/VISUAL_SYSTEM_v0.md).
 
 ## Status
 
-P0 inbox on the Worker: list / read / delete against D1, inbound attachments in R2, plus compose/send behind the owner session. Search (LIKE on from / subject / body), unread toggle with a nav count, and star/flag are in. System folders (inbox / sent / drafts / trash / spam) use the existing `messages.folder` column; drafts save and resume on `/compose`. Outbound is pluggable (`stub` / `resend` / `http`). Reply / reply-all / forward prefill compose and send through the same adapters (In-Reply-To / References on reply). The inbox list groups related mail into basic threads (count on the row; open expands in time order). Mailbox-scoped REST tokens live under `/api/v1` (hash at rest, `Authorization: Bearer pg_…`). Public signup is **off** unless Turnstile is configured. Small-team members (`users` + `user_mailboxes`) have address / storage / daily-send quotas; `/admin` is a forest-token 值守台 (ADMIN_TOKEN or admin role). Outbound send attachments are a later follow-up. Light-editorial brand art (paper + forest green) lives in [`docs/assets/`](docs/assets/).
+P0 inbox on the Worker: list / read / delete against D1, inbound attachments in R2, plus compose/send behind the owner session. Search (LIKE on from / subject / body), unread toggle with a nav count, and star/flag are in. System folders (inbox / sent / drafts / trash / spam) use the existing `messages.folder` column; drafts save and resume on `/compose`. Outbound is pluggable (`stub` / `resend` / `http`). Reply / reply-all / forward prefill compose and send through the same adapters (In-Reply-To / References on reply). The inbox list groups related mail into basic threads (count on the row; open expands in time order). Mailbox-scoped REST tokens live under `/api/v1` (hash at rest, `Authorization: Bearer pg_…`). Public signup is **off** unless Turnstile is configured. Small-team members (`users` + `user_mailboxes`) have address / storage / daily-send quotas; `/admin` is a forest-token 值守台 (ADMIN_TOKEN or admin role). Inbound webhooks POST a signed JSON payload; optional forward goes to a chat-bot URL or an external mailbox. Delivery failures stay on `/settings` and `/admin` (never swallowed). Outbound send attachments are a later follow-up. Light-editorial brand art (paper + forest green) lives in [`docs/assets/`](docs/assets/).
 
 ## Local development
 
@@ -234,7 +234,7 @@ curl -sS http://127.0.0.1:8787/healthz
 
 Expect JSON with `"ok": true` and `"db": "ready"` after migrations. A `503` with `"migrations_pending"` means the local D1 schema has not been applied.
 
-`GET /healthz` stays public (no session). After this milestone it also expects the `outbound_attempts` table (`npm run db:migrate:local`). The Email Routing handler is also unauthenticated — Cloudflare calls it, not a browser.
+`GET /healthz` stays public (no session). After this milestone it also expects `outbound_attempts`, `api_tokens`, `users`, `inbound_hooks`, and `inbound_deliveries` (`npm run db:migrate:local`). The Email Routing handler is also unauthenticated — Cloudflare calls it, not a browser.
 
 ### Compose and outbound
 
@@ -273,15 +273,64 @@ Open [http://127.0.0.1:8787/compose](http://127.0.0.1:8787/compose) while signed
 
 `src/safe-url.ts` is a default-deny helper for operator-supplied outbound URLs (inbound webhooks / forward, #11). Policy matches [open-site-health `internal/safeurl`](https://github.com/bugman666/open-site-health/tree/main/internal/safeurl): `http` / `https` only; block `localhost`, `*.localhost`, `localhost.localdomain`, and cloud metadata hostnames; block loopback, RFC1918, unspecified, link-local, multicast, CGNAT `100.64.0.0/10`, and `169.254.169.254`. Literal IPs in the hostname use the same ranges. Public `http` hosts are allowed; private hosts are the gate, not the scheme.
 
-Call `validateSafeUrl` at **save time** and again at **fetch time**. This check is host / IP-literal only. DNS rebinding and redirect hops are the caller's job.
+Inbound webhook / forward **save**, **fetch**, and **each redirect hop** call `validateSafeUrl`. Hostnames are re-checked after DNS (blocked if any A/AAAA is private). Redirects are followed manually (`redirect: "manual"`); a hop to metadata / RFC1918 / localhost is recorded as a failed delivery.
 
-Workers `fetch` cannot install a custom dialer (no restricted `DialContext`). Recommended:
+Default policy on this path: **https only**. `http://127.0.0.1` (and other private http) is allowed only when `ALLOW_PRIVATE_WEBHOOKS=1`. Public `http` is rejected at the webhook layer even though `validateSafeUrl` itself allows it. A bad config URL returns **400** with a clear hint (`blocked_destination` / `invalid_url`).
 
-1. Validate before `fetch`
-2. If you follow redirects yourself, re-validate each `Location`
-3. If you use `redirect: "follow"`, the runtime may land on a private address after a public first hop — residual SSRF risk
+Workers `fetch` cannot install a custom dialer (no restricted `DialContext`). Residual DNS-rebinding risk remains if the resolver is skipped.
 
-Operators who need local http hooks may set `ALLOW_PRIVATE_WEBHOOKS=1` and pass `allowPrivate: true`. The module honors that argument only; it does not read the environment or wire webhook routes.
+### Inbound webhooks / forward
+
+When a message is stored, Postgrove can notify a webhook and/or relay to a chat-bot URL or external mailbox. Config is per mailbox.
+
+| Surface | Auth | Role |
+|---------|------|------|
+| `GET`/`POST /api/hooks` | `requireOwner` | Read / save this mailbox's webhook + forward |
+| `GET /api/hooks/attempts` | `requireOwner` | Delivery log for this mailbox |
+| `GET`/`POST /admin/hooks` | `requireAdmin` | Same config for any `mailbox_id` |
+| `GET /admin/deliveries` | `requireAdmin` | Delivery log (optional `mailbox_id`) |
+| `GET`/`POST /settings` | `requireOwner` | Forest-token settings UI (not a cloud-mail clone) |
+
+Unauthorized → **401**. A mailbox/owner session on admin hook routes → **403**.
+
+**Signing algorithm (TC11.2).** POST body is JSON. Headers:
+
+- `X-Postgrove-Timestamp`: unix seconds
+- `X-Postgrove-Signature`: `v1=<hex>`
+- `X-Postgrove-Event`: `inbound`
+
+Signed string: `` `${timestamp}.${raw_json_body}` `` (UTF-8). MAC: **HMAC-SHA256**, hex digest. A missing or wrong `webhook_secret` must fail verification. Suggested clock skew: ±5 minutes.
+
+Payload fields: `event`, `message_id`, `mailbox_id`, `from`, `to`, `subject`, `snippet`, `text`, `received_at`.
+
+Optional **forward URL** POSTs `{ event: "inbound.forward", text, content, from, to, subject, snippet, message_id }` (chat bots that read `text` or `content`). Optional **forward email** uses the existing outbound adapter.
+
+Downstream HTTP errors and SSRF rejects are stored in `inbound_deliveries` and shown on `/settings` and the 值守台. Fancy retries are out of scope.
+
+```bash
+# after owner login cookie
+curl -sS -b /tmp/pg-cookies -X POST http://127.0.0.1:8787/api/hooks \
+  -H 'content-type: application/json' \
+  -d '{"webhook_enabled":true,"webhook_url":"https://hooks.example.test/inbound","webhook_secret":"replace-me-hook-secret"}'
+
+curl -sS -b /tmp/pg-cookies http://127.0.0.1:8787/api/hooks
+curl -sS -b /tmp/pg-cookies http://127.0.0.1:8787/api/hooks/attempts
+
+# admin
+curl -sS -H 'Authorization: Bearer change-me-local-admin-token' \
+  'http://127.0.0.1:8787/admin/hooks?mailbox_id=11111111-1111-4111-8111-111111111111'
+curl -sS -H 'Authorization: Bearer change-me-local-admin-token' \
+  http://127.0.0.1:8787/admin/deliveries
+```
+
+Internal/metadata save is **400**:
+
+```bash
+curl -sS -b /tmp/pg-cookies -o /dev/stderr -w '%{http_code}\n' \
+  -X POST http://127.0.0.1:8787/api/hooks \
+  -H 'content-type: application/json' \
+  -d '{"webhook_enabled":true,"webhook_url":"http://169.254.169.254/latest/meta-data/"}'
+```
 
 ### Auth (mailbox owner session + admin bearer)
 
@@ -503,7 +552,7 @@ Then, in the Cloudflare dashboard, enable Email Routing for your domain and add 
 | `src/rate-limit.ts` | In-memory limiter for token API + signup |
 | `src/users.ts` | Members, token hash, mailbox bindings |
 | `src/quotas.ts` | Address / storage / daily-send checks (`0` = unlimited) |
-| `src/admin.ts` | `/admin` 值守台 + JSON users / mailboxes / audit |
+| `src/admin.ts` | `/admin` 值守台 + JSON users / mailboxes / audit / inbound deliveries |
 | `src/health.ts` | `GET /healthz` |
 | `src/inbound.ts` | Email Routing stub persist + attachment limits |
 | `src/attachment-limits.ts` | Size / count caps and human-readable over-limit errors |
@@ -516,6 +565,7 @@ Then, in the Cloudflare dashboard, enable Email Routing for your domain and add 
 | `src/triage.ts` | Search `LIKE` helpers + unread / star filters |
 | `src/outbound.ts` | Pluggable outbound adapters (`stub` / `resend` / `http`) |
 | `src/safe-url.ts` | SSRF guard for operator-supplied outbound URLs (webhooks / forward) |
+| `src/webhooks.ts` | Inbound signed webhook + forward; `validateSafeUrl` on save/fetch/redirect |
 | `src/send.ts` | Validate + persist outbound attempts |
 | `migrations/0001_init.sql` | D1 `mailboxes` + `messages` |
 | `migrations/0002_message_body.sql` | `messages.body_text` |
@@ -526,6 +576,7 @@ Then, in the Cloudflare dashboard, enable Email Routing for your domain and add 
 | `migrations/0007_mailbox_folders.sql` | Folder / draft indexes (P1) |
 | `migrations/0008_api_tokens.sql` | Mailbox-scoped API tokens (hash at rest) |
 | `migrations/0009_users_rbac_quotas.sql` | `users`, `user_mailboxes`, `send_usage` |
+| `migrations/0010_inbound_hooks.sql` | `inbound_hooks` + `inbound_deliveries` |
 | `scripts/seed-local.sql` | Local sample mailboxes + messages (not for remote) |
 | `scripts/seed-grove-note.txt` | Local sample attachment bytes |
 | `wrangler.jsonc` | Worker + D1 + R2 bindings (placeholders) |

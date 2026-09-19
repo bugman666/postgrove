@@ -59,6 +59,16 @@ import {
   type MessageThread,
 } from "./threads";
 import { parseInboxFilter, parseSearchQuery, type InboxFilter } from "./triage";
+import {
+  HookInputError,
+  getHookConfig,
+  listDeliveries,
+  parseHookConfigBody,
+  publicHookConfig,
+  saveHookConfig,
+  type InboundDeliveryRecord,
+  type PublicHookConfig,
+} from "./webhooks";
 
 type NavId = SystemFolder | "unread" | "compose" | "addresses" | "settings" | "admin";
 
@@ -120,19 +130,13 @@ export async function handleUi(
   }
 
   if (path === "/settings") {
+    if (method === "POST") {
+      return handleSettingsSave(request, env, owner, ownMailbox, unreadCount);
+    }
     if (method !== "GET") {
       return pageMethodNotAllowed();
     }
-    return html(renderStubPage("settings", "设置", ownMailbox, [
-      owner.kind === "mailbox"
-        ? `你是成员 ${owner.userId}（${owner.role === "admin" ? "值守" : "信箱"}）。会话可打开已绑定的地址。`
-        : "这是主人会话（OWNER_TOKEN）。只绑在你登录的那一个地址上。",
-      "登出后需要再次 POST /auth/login。成员口令由值守发放，不是 OWNER_TOKEN。",
-      "还没收到信？确认 Email Routing 已指向本 Worker。",
-      describeOutbound(env).hint,
-      "入站附件存在 R2。单文件上限见 ATTACHMENT_MAX_BYTES（默认 10 MB）。成员还有地址 / 存储 / 日发送配额；超了会明确报错。",
-      "值守台在 /admin：ADMIN_TOKEN 或 admin 角色。普通成员进不去。",
-    ], true, unreadCount));
+    return renderSettings(env, owner, ownMailbox, unreadCount, url.searchParams.get("error"), url.searchParams.get("saved"));
   }
 
   const moveMatch = path.match(/^\/box\/([^/]+)\/m\/([^/]+)\/move$/);
@@ -391,6 +395,70 @@ async function handleAddressCreate(
     const hint = error instanceof MailboxInputError ? error.message : "没能开这个地址。";
     return html(renderAddressesPage(boxes, "addresses", unreadCount, hint), 400);
   }
+}
+
+async function handleSettingsSave(
+  request: Request,
+  env: Env,
+  owner: MailboxActor,
+  ownMailbox: MailboxRecord | null,
+  unreadCount: number,
+): Promise<Response> {
+  if (!ownMailbox) {
+    return renderSettings(env, owner, ownMailbox, unreadCount, "没有当前地址，先登录一个信箱。");
+  }
+  const data = await request.formData();
+  const body = {
+    webhook_enabled: stringField(data.get("webhook_enabled")) === "1",
+    webhook_url: stringField(data.get("webhook_url")),
+    webhook_secret: stringField(data.get("webhook_secret")),
+    rotate_secret: stringField(data.get("rotate_secret")) === "1",
+    forward_enabled: stringField(data.get("forward_enabled")) === "1",
+    forward_url: stringField(data.get("forward_url")),
+    forward_email: stringField(data.get("forward_email")),
+  };
+  try {
+    parseHookConfigBody(body);
+    await saveHookConfig(env, ownMailbox.id, parseHookConfigBody(body));
+    return redirect("/settings?saved=1");
+  } catch (error) {
+    const hint = error instanceof HookInputError ? error.message : "没能保存入站通知。";
+    return renderSettings(env, owner, ownMailbox, unreadCount, hint);
+  }
+}
+
+async function renderSettings(
+  env: Env,
+  owner: MailboxActor,
+  mailbox: MailboxRecord | null,
+  unreadCount: number,
+  error: string | null = null,
+  saved: string | null = null,
+): Promise<Response> {
+  let hook: PublicHookConfig | null = null;
+  let deliveries: InboundDeliveryRecord[] = [];
+  if (mailbox) {
+    try {
+      const row = await getHookConfig(env, mailbox.id);
+      hook = row
+        ? publicHookConfig(row)
+        : publicHookConfig({
+            mailbox_id: mailbox.id,
+            webhook_enabled: 0,
+            webhook_url: null,
+            webhook_secret: null,
+            forward_enabled: 0,
+            forward_url: null,
+            forward_email: null,
+            updated_at: 0,
+          });
+      deliveries = await listDeliveries(env, mailbox.id, 20);
+    } catch {
+      hook = null;
+    }
+  }
+  const status = error ? 400 : 200;
+  return html(renderSettingsPage(owner, mailbox, hook, deliveries, unreadCount, error, saved === "1"), status);
 }
 
 async function unauthorizedPage(authResponse: Response): Promise<Response> {
@@ -1377,17 +1445,81 @@ function renderAddressesPage(
   });
 }
 
-function renderStubPage(
-  nav: NavId,
-  heading: string,
+function renderSettingsPage(
+  owner: MailboxActor,
   mailbox: MailboxRecord | null,
-  notes: string[],
-  showLogout = false,
-  unreadCount = 0,
+  hook: PublicHookConfig | null,
+  deliveries: InboundDeliveryRecord[],
+  unreadCount: number,
+  error: string | null,
+  saved: boolean,
 ): string {
-  const banners = notes.map((note) => `<p class="banner">${escapeHtml(note)}</p>`).join("");
-  const logout = showLogout
-    ? `<form id="logout-form" class="logout-form">
+  const who =
+    owner.kind === "mailbox"
+      ? `你是成员 ${owner.userId}（${owner.role === "admin" ? "值守" : "信箱"}）。会话可打开已绑定的地址。`
+      : "这是主人会话（OWNER_TOKEN）。只绑在你登录的那一个地址上。";
+  const banners: string[] = [];
+  if (error) {
+    banners.push(`<p class="banner danger">${escapeHtml(error)}</p>`);
+  }
+  if (saved) {
+    banners.push(`<p class="banner success">入站通知已保存。密钥若刚生成，只在 API 响应里出现一次。</p>`);
+  }
+  banners.push(`<p class="banner">${escapeHtml(who)}</p>`);
+  banners.push(`<p class="banner">新信可以推到 webhook，或转发到外部邮箱 / 聊天机器人 URL。失败记在下面，不会静默吞掉。</p>`);
+
+  const form = mailbox
+    ? `<form class="grove-form grove-form-stack" method="post" action="/settings">
+        <label>Webhook URL
+          <input class="search" name="webhook_url" type="url" placeholder="https://hooks.example.test/inbound" value="${escapeHtml(hook?.webhook_url ?? "")}">
+        </label>
+        <label>Webhook 签名密钥
+          <input class="search" name="webhook_secret" type="password" placeholder="${hook?.webhook_secret_set ? "已设置，留空保持" : "留空则生成"}" autocomplete="new-password">
+        </label>
+        <label>Webhook
+          <select name="webhook_enabled">
+            <option value="0"${hook?.webhook_enabled ? "" : " selected"}>关闭</option>
+            <option value="1"${hook?.webhook_enabled ? " selected" : ""}>开启</option>
+          </select>
+        </label>
+        <label>转发 URL（聊天机器人）
+          <input class="search" name="forward_url" type="url" placeholder="https://chat.example.test/hook" value="${escapeHtml(hook?.forward_url ?? "")}">
+        </label>
+        <label>转发邮箱
+          <input class="search" name="forward_email" type="email" placeholder="neighbor@example.test" value="${escapeHtml(hook?.forward_email ?? "")}">
+        </label>
+        <label>转发
+          <select name="forward_enabled">
+            <option value="0"${hook?.forward_enabled ? "" : " selected"}>关闭</option>
+            <option value="1"${hook?.forward_enabled ? " selected" : ""}>开启</option>
+          </select>
+        </label>
+        <label class="grove-check">
+          <input type="checkbox" name="rotate_secret" value="1"> 轮换 webhook 密钥
+        </label>
+        <button class="btn btn-primary" type="submit">保存入站通知</button>
+      </form>`
+    : `<p class="banner">没有当前地址，无法保存入站通知。</p>`;
+
+  const deliveryItems = deliveries.length
+    ? `<ul class="attempt-list">${deliveries
+        .map((row) => {
+          const status = row.status === "sent" ? "已送达" : `失败 · ${row.error || "downstream_failed"}`;
+          return `<li class="attempt${row.status === "failed" ? " selected" : ""}">
+            <div class="attempt-top">
+              <span class="attempt-status ${row.status}">${escapeHtml(status)}</span>
+              <time>${escapeHtml(formatReceived(row.created_at))}</time>
+            </div>
+            <div>种类 ${escapeHtml(row.kind === "webhook" ? "webhook" : "转发")}</div>
+            <div>目标 <span class="mono">${escapeHtml(row.target)}</span></div>
+            ${row.http_status ? `<div>HTTP ${row.http_status}</div>` : ""}
+            ${row.hint ? `<p class="attempt-hint">${escapeHtml(row.hint)}</p>` : ""}
+          </li>`;
+        })
+        .join("")}</ul>`
+    : `<div class="empty">${EMPTY_ART}<p>还没有投递记录。新信到达后会出现在这里。</p></div>`;
+
+  const logout = `<form id="logout-form" class="logout-form">
         <button class="btn" type="submit">登出</button>
       </form>
       <script>
@@ -1401,18 +1533,31 @@ function renderStubPage(
             });
           });
         })();
-      </script>`
-    : "";
+      </script>`;
+
   return layout({
-    title: `${heading} · Postgrove`,
-    nav,
+    title: "设置 · Postgrove",
+    nav: "settings",
     mailbox,
     mode: "list",
     simple: true,
     unreadCount,
     body: `<main class="page"><div class="page-inner">
-      <div class="page-head"><h1>${escapeHtml(heading)}</h1></div>
-      <div class="page-card">${banners}${logout}</div>
+      <div class="page-head"><h1>设置</h1></div>
+      <div class="page-card">
+        ${banners.join("")}
+        <section class="grove-panel">
+          <h2>入站通知</h2>
+          <p class="banner">验签：<span class="mono">HMAC-SHA256</span>，签名串 <span class="mono">\${unix_seconds}.\${raw_json_body}</span>。请求头 <span class="mono">X-Postgrove-Timestamp</span> 与 <span class="mono">X-Postgrove-Signature: v1=&lt;hex&gt;</span>。密钥错了或没带，接收方必须验失败。默认只允许 https；内网 / 元数据 / RFC1918 会被拒绝。</p>
+          ${form}
+        </section>
+        <section class="grove-panel">
+          <h2>投递记录</h2>
+          ${deliveryItems}
+        </section>
+        <p class="banner">登出后需要再次 POST /auth/login。成员口令由值守发放。值守台在 /admin，普通成员进不去。入站附件在 R2。</p>
+        ${logout}
+      </div>
     </div></main>`,
   });
 }
