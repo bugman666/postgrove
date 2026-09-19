@@ -1,12 +1,25 @@
 import {
+  AliasInputError,
+  aliasHttpStatus,
+  createAlias,
+  deleteAlias,
+  generateAlias,
+  getAlias,
+  listAliases,
+  publicAlias,
+} from "./aliases.ts";
+import {
   findApiTokenByHash,
   getApiToken,
   hashApiToken,
   insertApiToken,
   listApiTokens,
   looksLikeApiToken,
+  normalizeQuotaLimit,
+  normalizeTokenKind,
   publicToken,
   revokeApiToken,
+  type ApiTokenKind,
   type ApiTokenRecord,
 } from "./api-tokens.ts";
 import { bearerToken, requireAdmin, type AdminPrincipal, type MailboxActor } from "./auth.ts";
@@ -18,8 +31,15 @@ import {
   methodNotAllowed,
   notFoundJson,
   payloadTooLargeJson,
+  quotaJson,
   unauthorizedJson,
 } from "./http.ts";
+import {
+  checkTokenRequestQuota,
+  checkTokenSendQuota,
+  incrementTokenRequestUsage,
+  incrementTokenSendUsage,
+} from "./quotas.ts";
 import {
   REST_RATE_LIMIT_MAX,
   REST_RATE_LIMIT_WINDOW_MS,
@@ -55,9 +75,12 @@ export const REST_CREATE_FORBIDDEN_HINT =
 
 type TokenPrincipal = {
   kind: "token";
+  tokenKind: ApiTokenKind;
   tokenId: string;
   mailboxId: string;
   address: string;
+  quotaRequestsDaily: number;
+  quotaSendDaily: number;
 };
 
 type RestPrincipal = TokenPrincipal | AdminPrincipal;
@@ -117,7 +140,7 @@ async function handleV1(request: Request, env: Env, url: URL): Promise<Response>
       ok: true,
       service: "postgrove",
       api: "v1",
-      hint: "Send Authorization: Bearer pg_… for mailbox-scoped REST, including POST /api/v1/dev/inboxes. See README (Open REST API / Dev inbox API).",
+      hint: "Send Authorization: Bearer pg_… (mailbox or admin-kind) or ADMIN_TOKEN. Aliases: /api/v1/aliases. Dev inboxes: /api/v1/dev/inboxes. See README (Open REST API).",
     });
   }
 
@@ -136,10 +159,42 @@ async function handleV1(request: Request, env: Env, url: URL): Promise<Response>
     return limited.response;
   }
 
+  const quota = await applyTokenRequestQuota(env, gate.principal);
+  if (quota) {
+    return quota;
+  }
+
   const principal = gate.principal;
 
   if (path === "/api/v1/dev/inboxes" || path.startsWith("/api/v1/dev/inboxes/")) {
     return handleDevInboxRoutes(request, env, url, principal);
+  }
+
+  const revokeAlias = path.match(/^\/api\/v1\/aliases\/([^/]+)\/revoke$/);
+  if (revokeAlias) {
+    return request.method === "POST"
+      ? restRevokeAlias(env, principal, decodeURIComponent(revokeAlias[1]))
+      : methodNotAllowed("POST");
+  }
+
+  if (path === "/api/v1/aliases") {
+    return handleAliasesCollection(request, env, principal, url);
+  }
+
+  const mailboxAliases = path.match(/^\/api\/v1\/mailboxes\/([^/]+)\/aliases$/);
+  if (mailboxAliases) {
+    return handleMailboxAliases(request, env, principal, decodeURIComponent(mailboxAliases[1]));
+  }
+
+  const revokeToken = path.match(/^\/api\/v1\/tokens\/([^/]+)\/revoke$/);
+  if (revokeToken) {
+    return request.method === "POST"
+      ? restRevokeToken(env, principal, decodeURIComponent(revokeToken[1]))
+      : methodNotAllowed("POST");
+  }
+
+  if (path === "/api/v1/tokens") {
+    return handleRestTokens(request, env, principal, url);
   }
 
   if (path === "/api/v1/mailboxes") {
@@ -147,7 +202,7 @@ async function handleV1(request: Request, env: Env, url: URL): Promise<Response>
       return listAddresses(env, principal);
     }
     if (method === "POST") {
-      if (principal.kind === "token") {
+      if (!restIsAdmin(principal)) {
         return json(
           { ok: false, error: "forbidden", hint: REST_CREATE_FORBIDDEN_HINT },
           403,
@@ -240,9 +295,12 @@ async function requireRestAuth(request: Request, env: Env): Promise<AuthResult<R
       ok: true,
       principal: {
         kind: "token",
+        tokenKind: row.kind,
         tokenId: row.id,
         mailboxId: mailbox.id,
         address: mailbox.address,
+        quotaRequestsDaily: row.quota_requests_daily,
+        quotaSendDaily: row.quota_send_daily,
       },
     };
   }
@@ -258,7 +316,7 @@ async function requireRestAuth(request: Request, env: Env): Promise<AuthResult<R
 }
 
 async function listAddresses(env: Env, principal: RestPrincipal): Promise<Response> {
-  if (principal.kind === "admin") {
+  if (restIsAdmin(principal)) {
     const mailboxes = await listMailboxes(env);
     return json({ ok: true, mailboxes: mailboxes.map(publicMailbox) });
   }
@@ -393,7 +451,20 @@ async function sendMessage(request: Request, env: Env, principal: RestPrincipal)
   if (!fields.ok) {
     return json({ ok: false, error: fields.error, hint: fields.hint }, 400);
   }
+  if (principal.kind === "token") {
+    const sendQuota = await checkTokenSendQuota(env, principal.tokenId, principal.quotaSendDaily);
+    if (sendQuota) {
+      return quotaJson(sendQuota.error, sendQuota.hint, { used: sendQuota.used, limit: sendQuota.limit });
+    }
+  }
   const outcome = await sendOutbound(env, mailbox, fields.input);
+  if (principal.kind === "token" && outcome.attempt.status === "sent") {
+    try {
+      await incrementTokenSendUsage(env, principal.tokenId);
+    } catch {
+      // Usage table missing: do not hide a successful send.
+    }
+  }
   return json(
     {
       ok: outcome.attempt.status === "sent",
@@ -501,11 +572,17 @@ async function adminMintToken(request: Request, env: Env): Promise<Response> {
   const mailboxKey = stringField(parsed.body, "mailbox_id") ?? stringField(parsed.body, "address");
   if (!mailboxKey) {
     return json(
-      { ok: false, error: "invalid_request", hint: 'Send JSON { "mailbox_id" } (optional label).' },
+      { ok: false, error: "invalid_request", hint: 'Send JSON { "mailbox_id" } (optional label, kind, quota_requests_daily, quota_send_daily).' },
       400,
     );
   }
-  return mintForMailbox(env, mailboxKey, stringField(parsed.body, "label"));
+  const kindRaw = stringField(parsed.body, "kind");
+  const kind = kindRaw ? normalizeTokenKind(kindRaw) : "mailbox";
+  return mintForMailbox(env, mailboxKey, stringField(parsed.body, "label"), {
+    kind,
+    quotaRequestsDaily: quotaField(parsed.body, "quota_requests_daily", envDefaultRequestQuota(env)),
+    quotaSendDaily: quotaField(parsed.body, "quota_send_daily", envDefaultSendQuota(env)),
+  });
 }
 
 async function adminListTokens(request: Request, env: Env, url: URL): Promise<Response> {
@@ -566,7 +643,11 @@ export async function handleOwnerTokenRoutes(
       if (!parsed.ok) {
         return parsed.response;
       }
-      return mintForMailbox(env, owner.mailboxId, stringField(parsed.body, "label"));
+      return mintForMailbox(env, owner.mailboxId, stringField(parsed.body, "label"), {
+        kind: "mailbox",
+        quotaRequestsDaily: quotaField(parsed.body, "quota_requests_daily", envDefaultRequestQuota(env)),
+        quotaSendDaily: quotaField(parsed.body, "quota_send_daily", envDefaultSendQuota(env)),
+      });
     }
     return methodNotAllowed("GET, POST");
   }
@@ -584,7 +665,12 @@ export async function handleOwnerTokenRoutes(
   return null;
 }
 
-async function mintForMailbox(env: Env, mailboxKey: string, label: string | null): Promise<Response> {
+async function mintForMailbox(
+  env: Env,
+  mailboxKey: string,
+  label: string | null,
+  extras: { kind?: ApiTokenKind; quotaRequestsDaily?: number; quotaSendDaily?: number } = {},
+): Promise<Response> {
   const mailbox = await getMailbox(env, mailboxKey);
   if (!mailbox) {
     return notFoundJson();
@@ -595,7 +681,7 @@ async function mintForMailbox(env: Env, mailboxKey: string, label: string | null
       400,
     );
   }
-  const issued = await insertApiToken(env, mailbox.id, label);
+  const issued = await insertApiToken(env, mailbox.id, label, extras);
   return json(
     {
       ok: true,
@@ -607,8 +693,286 @@ async function mintForMailbox(env: Env, mailboxKey: string, label: string | null
   );
 }
 
+export async function handleOwnerAliasRoutes(
+  request: Request,
+  env: Env,
+  url: URL,
+  owner: MailboxActor,
+): Promise<Response | null> {
+  const path = url.pathname;
+  if (path === "/api/aliases") {
+    const mailbox = await getMailbox(env, owner.mailboxId);
+    if (!mailbox) {
+      return notFoundJson();
+    }
+    return mailboxAliasCollection(request, env, mailbox);
+  }
+  const remove = path.match(/^\/api\/aliases\/([^/]+)\/revoke$/);
+  if (remove) {
+    if (request.method !== "POST") {
+      return methodNotAllowed("POST");
+    }
+    return revokeOwnedAlias(env, owner.mailboxId, decodeURIComponent(remove[1]));
+  }
+  return null;
+}
+
+async function handleAliasesCollection(
+  request: Request,
+  env: Env,
+  principal: RestPrincipal,
+  url: URL,
+): Promise<Response> {
+  const mailboxKey =
+    url.searchParams.get("mailbox_id") ??
+    url.searchParams.get("address") ??
+    (principal.kind === "token" ? principal.mailboxId : null);
+  if (!mailboxKey) {
+    return json(
+      { ok: false, error: "invalid_request", hint: "Pass mailbox_id (or address) as a query parameter." },
+      400,
+    );
+  }
+  return handleMailboxAliases(request, env, principal, mailboxKey);
+}
+
+async function handleMailboxAliases(
+  request: Request,
+  env: Env,
+  principal: RestPrincipal,
+  mailboxKey: string,
+): Promise<Response> {
+  const mailbox = await getMailbox(env, mailboxKey);
+  if (!mailbox) {
+    return notFoundJson();
+  }
+  const denied = denyOtherMailbox(principal, mailbox);
+  if (denied) {
+    return denied;
+  }
+  return mailboxAliasCollection(request, env, mailbox);
+}
+
+async function mailboxAliasCollection(
+  request: Request,
+  env: Env,
+  mailbox: MailboxRecord,
+): Promise<Response> {
+  if (request.method === "GET") {
+    const aliases = await listAliases(env, mailbox.id);
+    return json({
+      ok: true,
+      mailbox: publicMailbox(mailbox),
+      aliases: aliases.map(publicAlias),
+    });
+  }
+  if (request.method !== "POST") {
+    return methodNotAllowed("GET, POST");
+  }
+  const parsed = await readJsonObject(
+    request,
+    env,
+    'Send JSON { "generate": true } or { "address": "user+tag@your-domain" }.',
+  );
+  if (!parsed.ok) {
+    return parsed.response;
+  }
+  try {
+    const generate =
+      parsed.body.generate === true || stringField(parsed.body, "action") === "generate";
+    const row = generate
+      ? await generateAlias(env, mailbox)
+      : await createAlias(env, mailbox, stringField(parsed.body, "address") ?? "");
+    return json({ ok: true, mailbox: publicMailbox(mailbox), alias: publicAlias(row) }, 201);
+  } catch (error) {
+    if (error instanceof AliasInputError) {
+      return json({ ok: false, error: error.error, hint: error.message }, aliasHttpStatus(error.error));
+    }
+    throw error;
+  }
+}
+
+async function revokeOwnedAlias(env: Env, mailboxId: string, aliasId: string): Promise<Response> {
+  const revoked = await deleteAlias(env, aliasId, mailboxId);
+  if (!revoked) {
+    return notFoundJson();
+  }
+  return json({ ok: true, alias: publicAlias(revoked) });
+}
+
+async function restRevokeAlias(
+  env: Env,
+  principal: RestPrincipal,
+  aliasId: string,
+): Promise<Response> {
+  const existing = await getAlias(env, aliasId);
+  if (!existing) {
+    return notFoundJson();
+  }
+  const mailbox = await getMailbox(env, existing.mailbox_id);
+  if (!mailbox) {
+    return notFoundJson();
+  }
+  const denied = denyOtherMailbox(principal, mailbox);
+  if (denied) {
+    return denied;
+  }
+  return revokeOwnedAlias(env, restIsAdmin(principal) ? existing.mailbox_id : mailbox.id, aliasId);
+}
+
+async function handleRestTokens(
+  request: Request,
+  env: Env,
+  principal: RestPrincipal,
+  url: URL,
+): Promise<Response> {
+  if (request.method === "GET") {
+    const mailboxKey =
+      url.searchParams.get("mailbox_id") ??
+      url.searchParams.get("address") ??
+      (principal.kind === "token" ? principal.mailboxId : null);
+    if (!mailboxKey) {
+      return json(
+        { ok: false, error: "invalid_request", hint: "Pass mailbox_id (or address) as a query parameter." },
+        400,
+      );
+    }
+    const mailbox = await getMailbox(env, mailboxKey);
+    if (!mailbox) {
+      return notFoundJson();
+    }
+    const denied = denyOtherMailbox(principal, mailbox);
+    if (denied) {
+      return denied;
+    }
+    const tokens = await listApiTokens(env, mailbox.id);
+    return json({ ok: true, mailbox: publicMailbox(mailbox), tokens: tokens.map((row) => publicToken(row)) });
+  }
+  if (request.method !== "POST") {
+    return methodNotAllowed("GET, POST");
+  }
+  const parsed = await readJsonObject(request, env, 'Send JSON { "label" } (optional mailbox_id, kind, quotas).');
+  if (!parsed.ok) {
+    return parsed.response;
+  }
+  const mailboxKey =
+    stringField(parsed.body, "mailbox_id") ??
+    stringField(parsed.body, "address") ??
+    (principal.kind === "token" ? principal.mailboxId : null);
+  if (!mailboxKey) {
+    return json(
+      { ok: false, error: "invalid_request", hint: 'Send JSON { "mailbox_id" } or mint against the bound mailbox.' },
+      400,
+    );
+  }
+  const mailbox = await getMailbox(env, mailboxKey);
+  if (!mailbox) {
+    return notFoundJson();
+  }
+  const denied = denyOtherMailbox(principal, mailbox);
+  if (denied) {
+    return denied;
+  }
+  const kindRaw = stringField(parsed.body, "kind");
+  if (kindRaw === "admin" && !restIsAdmin(principal)) {
+    return json(
+      {
+        ok: false,
+        error: "forbidden",
+        hint: "Mailbox-scoped API tokens cannot mint admin keys. Use ADMIN_TOKEN or an admin-kind pg_ key.",
+      },
+      403,
+    );
+  }
+  return mintForMailbox(env, mailbox.id, stringField(parsed.body, "label"), {
+    kind: restIsAdmin(principal) && kindRaw === "admin" ? "admin" : "mailbox",
+    quotaRequestsDaily: quotaField(parsed.body, "quota_requests_daily", envDefaultRequestQuota(env)),
+    quotaSendDaily: quotaField(parsed.body, "quota_send_daily", envDefaultSendQuota(env)),
+  });
+}
+
+async function restRevokeToken(
+  env: Env,
+  principal: RestPrincipal,
+  tokenId: string,
+): Promise<Response> {
+  const existing = await getApiToken(env, tokenId);
+  if (!existing) {
+    return notFoundJson();
+  }
+  const mailbox = await getMailbox(env, existing.mailbox_id);
+  if (!mailbox) {
+    return notFoundJson();
+  }
+  const denied = denyOtherMailbox(principal, mailbox);
+  if (denied) {
+    return denied;
+  }
+  if (!restIsAdmin(principal) && existing.kind === "admin") {
+    return json(
+      {
+        ok: false,
+        error: "forbidden",
+        hint: "Mailbox-scoped API tokens cannot revoke admin keys.",
+      },
+      403,
+    );
+  }
+  const revoked = await revokeApiToken(env, tokenId, restIsAdmin(principal) ? null : mailbox.id);
+  if (!revoked) {
+    return notFoundJson();
+  }
+  return json({ ok: true, token: publicToken(revoked) });
+}
+
+async function applyTokenRequestQuota(env: Env, principal: RestPrincipal): Promise<Response | null> {
+  if (principal.kind !== "token") {
+    return null;
+  }
+  try {
+    const over = await checkTokenRequestQuota(env, principal.tokenId, principal.quotaRequestsDaily);
+    if (over) {
+      return quotaJson(over.error, over.hint, { used: over.used, limit: over.limit });
+    }
+    await incrementTokenRequestUsage(env, principal.tokenId);
+  } catch {
+    // Migration 0012 not applied: skip daily quota so rate_limited still works.
+  }
+  return null;
+}
+
+function restIsAdmin(principal: RestPrincipal): boolean {
+  return principal.kind === "admin" || (principal.kind === "token" && principal.tokenKind === "admin");
+}
+
+function envDefaultRequestQuota(env: Env): number {
+  return parseNonNegativeInt(env.REST_QUOTA_REQUESTS_DAILY, 0);
+}
+
+function envDefaultSendQuota(env: Env): number {
+  return parseNonNegativeInt(env.REST_QUOTA_SEND_DAILY, 0);
+}
+
+function quotaField(body: Record<string, unknown>, key: string, fallback: number): number {
+  if (!(key in body) || body[key] == null) {
+    return fallback;
+  }
+  return normalizeQuotaLimit(body[key]);
+}
+
+function parseNonNegativeInt(raw: string | undefined, fallback: number): number {
+  if (!raw) {
+    return fallback;
+  }
+  const value = Number.parseInt(raw.trim(), 10);
+  if (!Number.isFinite(value) || value < 0) {
+    return fallback;
+  }
+  return value;
+}
+
 function denyOtherMailbox(principal: RestPrincipal, mailbox: MailboxRecord): Response | null {
-  if (principal.kind === "admin") {
+  if (restIsAdmin(principal)) {
     return null;
   }
   if (principal.mailboxId === mailbox.id || principal.address === mailbox.address) {

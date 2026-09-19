@@ -27,18 +27,24 @@ export function likeContains(value: string): string {
 }
 
 /**
- * JS stand-in for the SQL LIKE match (from / subject / body).
+ * JS stand-in for the SQL LIKE match (from / subject / body / envelope To).
+ * Envelope To is included so +tag aliases stay searchable.
  * SQLite LIKE is case-insensitive for ASCII; this lowercases the same way.
  */
 export function messageMatchesQuery(
-  row: { envelope_from: string; subject: string | null; body_text: string | null },
+  row: {
+    envelope_from: string;
+    envelope_to?: string;
+    subject: string | null;
+    body_text: string | null;
+  },
   q: string,
 ): boolean {
   const needle = q.trim().toLowerCase();
   if (!needle) {
     return true;
   }
-  const hay = [row.envelope_from, row.subject ?? "", row.body_text ?? ""]
+  const hay = [row.envelope_from, row.envelope_to ?? "", row.subject ?? "", row.body_text ?? ""]
     .join("\n")
     .toLowerCase();
   return hay.includes(needle);

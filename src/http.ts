@@ -78,11 +78,11 @@ export function payloadTooLargeJson(maxBytes: number): Response {
 }
 
 export function quotaJson(
-  error: "quota_addresses" | "quota_storage" | "quota_send",
+  error: "quota_addresses" | "quota_storage" | "quota_send" | "quota_api",
   hint: string,
   extra?: Record<string, unknown>,
 ): Response {
-  const status = error === "quota_send" ? 429 : 409;
+  const status = error === "quota_send" || error === "quota_api" ? 429 : 409;
   return json({ ok: false, error, hint, ...extra }, status);
 }
 

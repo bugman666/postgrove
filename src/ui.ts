@@ -4,6 +4,14 @@ import {
   renderAttachmentsHtml,
   type AttachmentRecord,
 } from "./attachments.ts";
+import {
+  AliasInputError,
+  createAlias,
+  generateAlias,
+  listAliases,
+  renderAliasPanelHtml,
+  type MailboxAliasRecord,
+} from "./aliases.ts";
 import { actorUserId, requireOwner, type MailboxActor } from "./auth.ts";
 import {
   FOLDER_LABELS,
@@ -159,6 +167,7 @@ export async function handleUi(
       url.searchParams.get("error"),
       url.searchParams.get("saved"),
       url.searchParams.get("lang"),
+      url.searchParams.get("alias"),
     );
   }
 
@@ -439,6 +448,22 @@ async function handleSettingsSave(
     const preference = parseLocalePreference(stringField(data.get("locale")));
     return withLocaleCookie(redirect("/settings?lang=1"), request, preference);
   }
+  if (stringField(data.get("intent")) === "alias") {
+    if (!ownMailbox) {
+      return renderSettings(env, owner, ownMailbox, unreadCount, shell, "没有当前地址，先登录一个信箱。");
+    }
+    try {
+      if (stringField(data.get("action")) === "generate") {
+        await generateAlias(env, ownMailbox);
+      } else {
+        await createAlias(env, ownMailbox, stringField(data.get("address")) ?? "");
+      }
+      return redirect("/settings?alias=1");
+    } catch (error) {
+      const hint = error instanceof AliasInputError ? error.message : "没能保存别名。";
+      return renderSettings(env, owner, ownMailbox, unreadCount, shell, hint);
+    }
+  }
   if (!ownMailbox) {
     return renderSettings(env, owner, ownMailbox, unreadCount, shell, "没有当前地址，先登录一个信箱。");
   }
@@ -470,10 +495,17 @@ async function renderSettings(
   error: string | null = null,
   saved: string | null = null,
   lang: string | null = null,
+  aliasSaved: string | null = null,
 ): Promise<Response> {
   let hook: PublicHookConfig | null = null;
   let deliveries: InboundDeliveryRecord[] = [];
+  let aliases: MailboxAliasRecord[] = [];
   if (mailbox) {
+    try {
+      aliases = await listAliases(env, mailbox.id);
+    } catch {
+      aliases = [];
+    }
     try {
       const row = await getHookConfig(env, mailbox.id);
       hook = row
@@ -495,7 +527,19 @@ async function renderSettings(
   }
   const status = error ? 400 : 200;
   return html(
-    renderSettingsPage(owner, mailbox, hook, deliveries, unreadCount, shell, error, saved === "1", lang === "1"),
+    renderSettingsPage(
+      owner,
+      mailbox,
+      hook,
+      deliveries,
+      aliases,
+      unreadCount,
+      shell,
+      error,
+      saved === "1",
+      lang === "1",
+      aliasSaved === "1",
+    ),
     status,
   );
 }
@@ -1000,7 +1044,7 @@ function renderInboxPage(
         <h1>${escapeHtml(heading)}</h1>
         ${folderStrip(shell, mailbox, "inbox")}
         <form class="search-form" method="get" action="${escapeHtml(boxPath(mailbox.id))}">
-          <input class="search" type="search" name="q" value="${escapeHtml(q)}" placeholder="搜索发件人、主题或正文" maxlength="200">
+          <input class="search" type="search" name="q" value="${escapeHtml(q)}" placeholder="搜索发件人、收件人、主题或正文" maxlength="200">
           ${filter !== "all" ? `<input type="hidden" name="filter" value="${escapeHtml(filter)}">` : ""}
         </form>
         <div class="filters">${chips}</div>
@@ -1520,11 +1564,13 @@ function renderSettingsPage(
   mailbox: MailboxRecord | null,
   hook: PublicHookConfig | null,
   deliveries: InboundDeliveryRecord[],
+  aliases: MailboxAliasRecord[],
   unreadCount: number,
   shell: Shell,
   error: string | null,
   saved: boolean,
   langUpdated: boolean,
+  aliasSaved: boolean,
 ): string {
   const who =
     owner.kind === "mailbox"
@@ -1539,6 +1585,9 @@ function renderSettingsPage(
   }
   if (langUpdated) {
     banners.push(`<p class="banner success">${escapeHtml(tr(shell, "banner.lang-updated"))}</p>`);
+  }
+  if (aliasSaved) {
+    banners.push(`<p class="banner success">${escapeHtml(tr(shell, "banner.alias-created"))}</p>`);
   }
   banners.push(`<p class="banner">${escapeHtml(who)}</p>`);
   banners.push(`<p class="banner">新信可以推到 webhook，或转发到外部邮箱 / 聊天机器人 URL。失败记在下面，不会静默吞掉。</p>`);
@@ -1639,6 +1688,15 @@ function renderSettingsPage(
       <div class="page-card">
         ${banners.join("")}
         ${languageForm}
+        ${renderAliasPanelHtml(mailbox, aliases, {
+          heading: tr(shell, "heading.aliases"),
+          hint: tr(shell, "banner.alias-hint"),
+          generate: tr(shell, "label.generate-alias"),
+          custom: tr(shell, "label.custom-alias"),
+          submit: tr(shell, "label.save-alias"),
+          empty: tr(shell, "empty.aliases"),
+          primary: tr(shell, "banner.alias-primary"),
+        })}
         <section class="grove-panel">
           <h2>入站通知</h2>
           <p class="banner">验签：<span class="mono">HMAC-SHA256</span>，签名串 <span class="mono">\${unix_seconds}.\${raw_json_body}</span>。请求头 <span class="mono">X-Postgrove-Timestamp</span> 与 <span class="mono">X-Postgrove-Signature: v1=&lt;hex&gt;</span>。密钥错了或没带，接收方必须验失败。默认只允许 https；内网 / 元数据 / RFC1918 会被拒绝。</p>

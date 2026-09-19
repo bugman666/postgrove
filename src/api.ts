@@ -1,6 +1,6 @@
 import type { Env } from "./env.ts";
 import { actorUserId, requireOwner, type MailboxActor } from "./auth.ts";
-import { handleOwnerTokenRoutes } from "./rest.ts";
+import { handleOwnerAliasRoutes, handleOwnerTokenRoutes } from "./rest.ts";
 import {
   isSystemFolder,
   parseDraftFields,
@@ -72,6 +72,11 @@ export async function handleApi(
   const tokens = await handleOwnerTokenRoutes(request, env, url, owner);
   if (tokens) {
     return tokens;
+  }
+
+  const aliases = await handleOwnerAliasRoutes(request, env, url, owner);
+  if (aliases) {
+    return aliases;
   }
 
   if (path === "/api/locale") {

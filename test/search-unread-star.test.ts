@@ -239,7 +239,7 @@ function fromLikeContains(pattern: string): string {
   return inner.replace(/\\%/g, "%").replace(/\\_/g, "_").replace(/\\\\/g, "\\");
 }
 
-test("search helpers: LIKE escape and from/subject/body match", () => {
+test("search helpers: LIKE escape and from/subject/body/envelope-to match", () => {
   assert.equal(SEARCH_ENGINE, "like");
   assert.equal(parseInboxFilter("unread"), "unread");
   assert.equal(parseInboxFilter("starred"), "starred");
@@ -253,6 +253,10 @@ test("search helpers: LIKE escape and from/subject/body match", () => {
   assert.equal(messageMatchesQuery(invoice, "billing@grove.test"), true);
   assert.equal(messageMatchesQuery(invoice, "未读、有发件人"), true);
   assert.equal(messageMatchesQuery(invoice, "确认码"), false);
+  assert.equal(
+    messageMatchesQuery({ ...invoice, envelope_to: "inbox+promo@example.test" }, "promo"),
+    true,
+  );
 });
 
 test("TC8.7 unauthenticated search and star APIs are 401", async () => {
