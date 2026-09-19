@@ -95,8 +95,24 @@ test("ResendAdapter fails loud on 401", async () => {
   });
   assert.equal(result.ok, false);
   assert.equal(result.error, "outbound_auth_failed");
+  assert.equal(result.retryable, false);
   assert.match(result.hint ?? "", /RESEND_API_KEY/);
   assert.match(result.detail ?? "", /Invalid API key/);
+});
+
+test("ResendAdapter marks 503 as retryable", async () => {
+  const adapter = new ResendAdapter("re_fake", async () =>
+    new Response(JSON.stringify({ message: "unavailable" }), { status: 503 }),
+  );
+  const result = await adapter.send({
+    from: FROM,
+    to: "neighbor@example.test",
+    subject: "hi",
+    text: "body",
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.error, "outbound_failed");
+  assert.equal(result.retryable, true);
 });
 
 test("ResendAdapter forwards cc plus In-Reply-To / References", async () => {

@@ -11,7 +11,13 @@ import { forbiddenJson, json, methodNotAllowed, notFoundJson, quotaJson } from "
 import { parseLocalePreference, resolveLocale, t, withLocaleCookie } from "./i18n.ts";
 import { buildComposePrefill, parseComposeMode } from "./reply.ts";
 import { checkAddressQuota } from "./quotas.ts";
-import { parseSendFields, sendOutbound } from "./send.ts";
+import {
+  parseIdempotencyKey,
+  parseSendFields,
+  publicOutboundAttempt,
+  readIdempotencyKey,
+  sendOutbound,
+} from "./send.ts";
 import {
   countUnreadInbox,
   createMailbox,
@@ -33,7 +39,6 @@ import {
   updateDraft,
   type MailboxRecord,
   type MessageRecord,
-  type OutboundAttemptRecord,
 } from "./store.ts";
 import { bindUserMailbox, getUser, mailboxAllowed } from "./users.ts";
 import {
@@ -116,7 +121,7 @@ export async function handleApi(
     return json({
       ok: true,
       mailbox: publicMailbox(mailbox),
-      attempts: attempts.map(publicAttempt),
+      attempts: attempts.map(publicOutboundAttempt),
     });
   }
 
@@ -379,40 +384,27 @@ async function sendMessage(
     return json({ ok: false, error: parsed.error, hint: parsed.hint }, 400);
   }
 
-  const draftId = optionalId((body as Record<string, unknown>).draft_id);
+  const record = body as Record<string, unknown>;
+  const draftId = optionalId(record.draft_id);
+  const idempotency = parseIdempotencyKey(readIdempotencyKey(request, record));
+  if (!idempotency.ok) {
+    return json({ ok: false, error: idempotency.error, hint: idempotency.hint }, 400);
+  }
   const outcome = await sendOutbound(env, mailbox, parsed.input, {
     draftId,
     userId: actorUserId(owner),
+    idempotencyKey: idempotency.key,
   });
   return json(
     {
       ok: outcome.attempt.status === "sent",
-      attempt: publicAttempt(outcome.attempt),
+      attempt: publicOutboundAttempt(outcome.attempt),
       sent: outcome.sent ? publicMessageDetail(outcome.sent) : null,
       error: outcome.attempt.error,
       hint: outcome.attempt.hint,
     },
     outcome.httpStatus,
   );
-}
-
-function publicAttempt(row: OutboundAttemptRecord) {
-  return {
-    id: row.id,
-    mailbox_id: row.mailbox_id,
-    from: row.from_address,
-    to: row.to_address,
-    cc: row.cc_address,
-    subject: row.subject,
-    in_reply_to: row.in_reply_to,
-    references: row.references_header,
-    provider: row.provider,
-    status: row.status,
-    error: row.error,
-    hint: row.hint,
-    provider_message_id: row.provider_message_id,
-    created_at: row.created_at,
-  };
 }
 
 async function readMessage(

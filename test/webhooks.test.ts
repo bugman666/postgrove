@@ -121,7 +121,15 @@ class MemoryStatement {
       return this.db.messages.slice();
     }
     if (sql.includes("from outbound_attempts")) {
-      return this.db.outbound_attempts.slice();
+      let rows = this.db.outbound_attempts.slice();
+      if (sql.includes("idempotency_key =")) {
+        rows = rows.filter((row) => row.mailbox_id === a && row.idempotency_key === b);
+      } else if (sql.includes("where id =") && sql.includes("mailbox_id")) {
+        rows = rows.filter((row) => row.id === a && row.mailbox_id === b);
+      } else if (sql.includes("mailbox_id")) {
+        rows = rows.filter((row) => row.mailbox_id === a);
+      }
+      return rows;
     }
     return [];
   }
@@ -192,7 +200,8 @@ class MemoryStatement {
       this.db.outbound_attempts.push({
         id: b[0],
         mailbox_id: b[1],
-        status: "sent",
+        status: b[10],
+        idempotency_key: b[15],
       });
       return 1;
     }

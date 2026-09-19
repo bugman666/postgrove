@@ -169,6 +169,9 @@ export function attemptBanner(row: OutboundAttemptRecord): string {
         : "已发出。";
     return `<p class="banner success">${escapeHtml(extra)}</p>`;
   }
+  if (row.status === "pending") {
+    return `<p class="banner">发送还在处理：已记下出站记录，正在向提供商投递（最多 ${row.max_attempts} 次）。</p>`;
+  }
   const reason = row.error || "outbound_failed";
   const next = row.hint || "检查出站配置或稍后重试。";
   return `<p class="banner danger">没发出去：${escapeHtml(reason)}。${escapeHtml(next)}</p>`;
@@ -185,7 +188,11 @@ export function renderAttemptHistory(
     .map((row) => {
       const selected = row.id === highlightedId ? " selected" : "";
       const status =
-        row.status === "sent" ? "已发出" : `失败 · ${row.error || "outbound_failed"}`;
+        row.status === "sent"
+          ? "已发出"
+          : row.status === "pending"
+            ? "处理中"
+            : `失败 · ${row.error || "outbound_failed"}`;
       const subject = row.subject?.trim() ? row.subject : "（无主题）";
       return `<li class="attempt${selected}">
         <div class="attempt-top">

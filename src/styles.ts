@@ -697,6 +697,10 @@ textarea:focus-visible {
   color: var(--pg-color-danger);
 }
 
+.attempt-status.pending {
+  color: var(--pg-color-text-secondary);
+}
+
 .attempt .mono {
   font-family: var(--pg-font-mono);
   font-size: var(--pg-text-xs);
