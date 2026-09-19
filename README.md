@@ -31,6 +31,20 @@ Create addresses under your domain, read mail in a clean web inbox, send through
 | Files | R2 |
 | UI | Lightweight web app (details in Issues) |
 
+
+## Roadmap (phased)
+
+Capability ideas drawn from mainstream mail UX (e.g. Gmail), Cloudflare edge mailboxes, and developer inbox APIs — **implemented originally**; we do not copy UI, brand, or third-party temp-mail aggregation.
+
+| Phase | Focus | Highlights |
+|-------|--------|------------|
+| **P0 MVP** | Edge mailbox core | Inbound → D1, web inbox, compose/send, R2 attachments, simple auth; reply **UI stub only** |
+| **P1** | Mailbox completeness | Reply / reply-all / forward, folders + drafts + sent, search / unread / star, basic threads |
+| **P2** | Platform | Multi-user + RBAC/quotas, inbound webhooks/forward, open REST + abuse controls, light analytics, i18n, soft branding |
+| **P3** | Dev API (own domain) | Wait-for-message / OTP helpers, `+` aliases, API keys & quotas — **not** multi-provider disposable mail hubs |
+
+See Issues under milestones `P0-MVP` … `P3-dev-api`.
+
 ## Status
 
 Scaffolding. See Issues and the MVP milestone.
