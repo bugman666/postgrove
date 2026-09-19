@@ -77,6 +77,15 @@ export function payloadTooLargeJson(maxBytes: number): Response {
   );
 }
 
+export function quotaJson(
+  error: "quota_addresses" | "quota_storage" | "quota_send",
+  hint: string,
+  extra?: Record<string, unknown>,
+): Response {
+  const status = error === "quota_send" ? 429 : 409;
+  return json({ ok: false, error, hint, ...extra }, status);
+}
+
 export function methodNotAllowed(allow: string): Response {
   return json({ ok: false, error: "method_not_allowed" }, 405, { allow });
 }

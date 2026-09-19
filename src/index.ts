@@ -1,6 +1,7 @@
 import type { Env, InboundEmail } from "./env";
 import { handleApi } from "./api";
 import { ATTACHMENT_CSS, handleAttachmentRoutes } from "./attachments";
+import { handleAdmin } from "./admin.ts";
 import { handleAuthRoutes } from "./auth";
 import { handleHealth } from "./health";
 import { css } from "./http";
@@ -40,6 +41,10 @@ export default {
 
     if (url.pathname.startsWith("/api/")) {
       return handleApi(request, env, url);
+    }
+
+    if (url.pathname === "/admin" || url.pathname.startsWith("/admin/")) {
+      return handleAdmin(request, env, url);
     }
 
     return handleUi(request, env, url);

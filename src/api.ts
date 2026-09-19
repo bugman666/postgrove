@@ -1,26 +1,29 @@
-import type { Env } from "./env";
-import { requireOwner, type OwnerPrincipal } from "./auth";
+import type { Env } from "./env.ts";
+import { actorUserId, requireOwner, type MailboxActor } from "./auth.ts";
 import { handleOwnerTokenRoutes } from "./rest.ts";
 import {
   isSystemFolder,
   parseDraftFields,
   parseFolder,
   publicFolderList,
-} from "./folders";
-import { forbiddenJson, json, methodNotAllowed, notFoundJson } from "./http";
-import { buildComposePrefill, parseComposeMode } from "./reply";
-import { parseSendFields, sendOutbound } from "./send";
+} from "./folders.ts";
+import { forbiddenJson, json, methodNotAllowed, notFoundJson, quotaJson } from "./http.ts";
+import { buildComposePrefill, parseComposeMode } from "./reply.ts";
+import { checkAddressQuota } from "./quotas.ts";
+import { parseSendFields, sendOutbound } from "./send.ts";
 import {
   countUnreadInbox,
+  createMailbox,
   getInboxMessage,
   getMailbox,
   getMailboxMessage,
   getMessageById,
   insertDraft,
-  insertMailbox,
   listFolderMessages,
   listInboxMessages,
+  listMailboxesForUser,
   listOutboundAttempts,
+  MailboxInputError,
   markRead,
   moveMessage,
   setRead,
@@ -30,7 +33,8 @@ import {
   type MailboxRecord,
   type MessageRecord,
   type OutboundAttemptRecord,
-} from "./store";
+} from "./store.ts";
+import { bindUserMailbox, getUser, mailboxAllowed } from "./users.ts";
 import {
   findThreadById,
   groupMessagesIntoThreads,
@@ -38,8 +42,8 @@ import {
   threadHasStar,
   threadHasUnread,
   type MessageThread,
-} from "./threads";
-import { parseInboxFilter, parseSearchQuery, SEARCH_ENGINE } from "./triage";
+} from "./threads.ts";
+import { parseInboxFilter, parseSearchQuery, SEARCH_ENGINE } from "./triage.ts";
 
 export async function handleApi(
   request: Request,
@@ -60,8 +64,15 @@ export async function handleApi(
     return tokens;
   }
 
+  if (path === "/api/addresses") {
+    if (method !== "POST") {
+      return methodNotAllowed("POST");
+    }
+    return createOwnedAddress(request, env, owner);
+  }
+
   if (path === "/api/mailboxes" && method === "POST") {
-    return createOwnedMailbox(request, env);
+    return createOwnedAddress(request, env, owner);
   }
 
   if (path === "/api/send") {
@@ -91,12 +102,13 @@ export async function handleApi(
     if (method !== "GET") {
       return methodNotAllowed("GET, POST");
     }
-    const mailbox = await getMailbox(env, owner.mailboxId);
-    if (!mailbox) {
-      return notFoundJson();
-    }
-    const unreadCount = await countUnreadInbox(env, mailbox.id);
-    return json({ ok: true, mailboxes: [publicMailbox(mailbox)], unread_count: unreadCount });
+    const boxes = await visibleMailboxes(env, owner);
+    const unreadCount = boxes[0] ? await countUnreadInbox(env, boxes[0].id) : 0;
+    return json({
+      ok: true,
+      mailboxes: boxes.map(publicMailbox),
+      unread_count: unreadCount,
+    });
   }
 
   if (path === "/api/search") {
@@ -168,7 +180,7 @@ export async function handleApi(
     if (!mailbox) {
       return notFoundJson();
     }
-    if (!sameMailbox(owner, mailbox)) {
+    if (!mailboxAllowed(owner, mailbox)) {
       return forbiddenJson();
     }
     const folder = parseFolder(url.searchParams.get("folder"));
@@ -292,7 +304,7 @@ async function searchMessages(env: Env, mailbox: MailboxRecord, url: URL): Promi
 async function sendMessage(
   request: Request,
   env: Env,
-  owner: OwnerPrincipal,
+  owner: MailboxActor,
 ): Promise<Response> {
   const mailbox = await getMailbox(env, owner.mailboxId);
   if (!mailbox) {
@@ -329,7 +341,10 @@ async function sendMessage(
   }
 
   const draftId = optionalId((body as Record<string, unknown>).draft_id);
-  const outcome = await sendOutbound(env, mailbox, parsed.input, { draftId });
+  const outcome = await sendOutbound(env, mailbox, parsed.input, {
+    draftId,
+    userId: actorUserId(owner),
+  });
   return json(
     {
       ok: outcome.attempt.status === "sent",
@@ -363,14 +378,14 @@ function publicAttempt(row: OutboundAttemptRecord) {
 
 async function readMessage(
   env: Env,
-  owner: OwnerPrincipal,
+  owner: MailboxActor,
   messageId: string,
 ): Promise<Response> {
   const existing = await getMessageById(env, messageId);
   if (!existing) {
     return notFoundJson();
   }
-  if (existing.mailbox_id !== owner.mailboxId) {
+  if (!ownsMessage(owner, existing)) {
     return forbiddenJson();
   }
   if (existing.folder === "inbox" && existing.is_read !== 1) {
@@ -388,12 +403,15 @@ async function readMessage(
 
 async function readDraft(
   env: Env,
-  owner: OwnerPrincipal,
+  owner: MailboxActor,
   draftId: string,
 ): Promise<Response> {
-  const existing = await getMailboxMessage(env, owner.mailboxId, draftId);
+  const existing = await getMessageById(env, draftId);
   if (!existing || existing.folder !== "draft") {
     return notFoundJson();
+  }
+  if (!ownsMessage(owner, existing)) {
+    return forbiddenJson();
   }
   return json({ ok: true, draft: publicDraft(existing) });
 }
@@ -401,7 +419,7 @@ async function readDraft(
 async function upsertDraft(
   request: Request,
   env: Env,
-  owner: OwnerPrincipal,
+  owner: MailboxActor,
   draftId: string | null,
 ): Promise<Response> {
   const mailbox = await getMailbox(env, owner.mailboxId);
@@ -452,14 +470,14 @@ async function upsertDraft(
 async function moveOwnedMessage(
   request: Request,
   env: Env,
-  owner: OwnerPrincipal,
+  owner: MailboxActor,
   messageId: string,
 ): Promise<Response> {
   const existing = await getMessageById(env, messageId);
   if (!existing) {
     return notFoundJson();
   }
-  if (existing.mailbox_id !== owner.mailboxId) {
+  if (!ownsMessage(owner, existing)) {
     return forbiddenJson();
   }
 
@@ -501,7 +519,7 @@ async function moveOwnedMessage(
 
 async function composePrefill(
   env: Env,
-  owner: OwnerPrincipal,
+  owner: MailboxActor,
   messageId: string,
   url: URL,
 ): Promise<Response> {
@@ -509,10 +527,10 @@ async function composePrefill(
   if (!existing) {
     return notFoundJson();
   }
-  if (existing.mailbox_id !== owner.mailboxId) {
+  if (!ownsMessage(owner, existing)) {
     return forbiddenJson();
   }
-  const mailbox = await getMailbox(env, owner.mailboxId);
+  const mailbox = await getMailbox(env, existing.mailbox_id);
   if (!mailbox) {
     return notFoundJson();
   }
@@ -546,14 +564,14 @@ async function composePrefill(
 async function setMessageStar(
   request: Request,
   env: Env,
-  owner: OwnerPrincipal,
+  owner: MailboxActor,
   messageId: string,
 ): Promise<Response> {
   const existing = await getMessageById(env, messageId);
   if (!existing) {
     return notFoundJson();
   }
-  if (existing.mailbox_id !== owner.mailboxId) {
+  if (!ownsMessage(owner, existing)) {
     return forbiddenJson();
   }
 
@@ -576,14 +594,14 @@ async function setMessageStar(
 async function setMessageRead(
   request: Request,
   env: Env,
-  owner: OwnerPrincipal,
+  owner: MailboxActor,
   messageId: string,
 ): Promise<Response> {
   const existing = await getMessageById(env, messageId);
   if (!existing) {
     return notFoundJson();
   }
-  if (existing.mailbox_id !== owner.mailboxId) {
+  if (!ownsMessage(owner, existing)) {
     return forbiddenJson();
   }
 
@@ -660,14 +678,14 @@ async function readBooleanField(
 
 async function deleteMessage(
   env: Env,
-  owner: OwnerPrincipal,
+  owner: MailboxActor,
   messageId: string,
 ): Promise<Response> {
   const existing = await getMessageById(env, messageId);
   if (!existing) {
     return notFoundJson();
   }
-  if (existing.mailbox_id !== owner.mailboxId) {
+  if (!ownsMessage(owner, existing)) {
     return forbiddenJson();
   }
   const moved = await trashMessage(env, existing.mailbox_id, existing.id);
@@ -677,37 +695,80 @@ async function deleteMessage(
   return json({ ok: true, id: existing.id, folder: "trash" });
 }
 
-async function createOwnedMailbox(request: Request, env: Env): Promise<Response> {
+function ownsMessage(owner: MailboxActor, message: MessageRecord): boolean {
+  if (owner.kind === "owner") {
+    return message.mailbox_id === owner.mailboxId;
+  }
+  return owner.mailboxIds.includes(message.mailbox_id);
+}
+
+async function visibleMailboxes(env: Env, owner: MailboxActor): Promise<MailboxRecord[]> {
+  if (owner.kind === "mailbox") {
+    return listMailboxesForUser(env, owner.userId);
+  }
+  const mailbox = await getMailbox(env, owner.mailboxId);
+  return mailbox ? [mailbox] : [];
+}
+
+async function createOwnedAddress(
+  request: Request,
+  env: Env,
+  owner: MailboxActor,
+): Promise<Response> {
   let body: unknown;
   try {
     body = await request.json();
   } catch {
     return json(
-      { ok: false, error: "invalid_request", hint: 'Send JSON { "address" } (optional display_name).' },
+      {
+        ok: false,
+        error: "invalid_request",
+        hint: 'Send JSON { "address" } (optional display_name).',
+      },
       400,
     );
   }
   if (!body || typeof body !== "object") {
     return json(
-      { ok: false, error: "invalid_request", hint: 'Send JSON { "address" } (optional display_name).' },
+      {
+        ok: false,
+        error: "invalid_request",
+        hint: 'Send JSON { "address" } (optional display_name).',
+      },
       400,
     );
   }
   const record = body as Record<string, unknown>;
   const address = typeof record.address === "string" ? record.address : "";
   const displayName = typeof record.display_name === "string" ? record.display_name : null;
-  const created = await insertMailbox(env, { address, displayName });
-  if (!created.ok) {
-    return json(
-      { ok: false, error: created.error, hint: created.hint },
-      created.error === "address_taken" ? 409 : 400,
-    );
-  }
-  return json({ ok: true, mailbox: publicMailbox(created.mailbox) }, 201);
-}
 
-function sameMailbox(owner: OwnerPrincipal, mailbox: MailboxRecord): boolean {
-  return mailbox.id === owner.mailboxId || mailbox.address === owner.address;
+  const userId = actorUserId(owner);
+  if (userId) {
+    const user = await getUser(env, userId);
+    if (!user) {
+      return notFoundJson();
+    }
+    const quota = await checkAddressQuota(env, user);
+    if (quota) {
+      return quotaJson(quota.error, quota.hint, { used: quota.used, limit: quota.limit });
+    }
+  }
+
+  try {
+    const mailbox = await createMailbox(env, { address, displayName });
+    if (userId) {
+      await bindUserMailbox(env, userId, mailbox.id);
+    }
+    return json({ ok: true, mailbox: publicMailbox(mailbox) }, 201);
+  } catch (error) {
+    if (error instanceof MailboxInputError) {
+      return json(
+        { ok: false, error: error.error, hint: error.message },
+        error.error === "address_taken" ? 409 : 400,
+      );
+    }
+    throw error;
+  }
 }
 
 function publicMailbox(row: MailboxRecord) {

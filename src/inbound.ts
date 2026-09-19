@@ -2,6 +2,7 @@ import type { Env, InboundEmail } from "./env";
 import { inboundAttachmentRejection } from "./attachment-limits";
 import { persistInboundAttachments } from "./attachments";
 import { extractAttachments, extractBodies } from "./mime";
+import { inboundStorageRejection } from "./quotas.ts";
 
 export async function handleInbound(message: InboundEmail, env: Env): Promise<void> {
   let parsedTo: AddressParts;
@@ -51,6 +52,21 @@ export async function handleInbound(message: InboundEmail, env: Env): Promise<vo
       error: limitError.error,
     });
     message.setReject(limitError.hint);
+    return;
+  }
+  let storageError = null;
+  try {
+    storageError = await inboundStorageRejection(env, mailbox.id, message.rawSize);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "unknown";
+    console.log("inbound stub: storage quota lookup skipped", { detail });
+  }
+  if (storageError) {
+    console.log("inbound stub: storage quota rejected", {
+      to: parsedTo.address,
+      error: storageError.error,
+    });
+    message.setReject(storageError.hint);
     return;
   }
   const mailboxId = mailbox.id;

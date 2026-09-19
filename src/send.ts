@@ -5,6 +5,7 @@ import {
   type OutboundDraft,
   type SendInput,
 } from "./outbound.ts";
+import { checkSendQuota, incrementSendUsage } from "./quotas.ts";
 import {
   insertOutboundAttempt,
   insertSentMessage,
@@ -13,6 +14,7 @@ import {
   type MessageRecord,
   type OutboundAttemptRecord,
 } from "./store.ts";
+import { getUser } from "./users.ts";
 
 export { parseSendFields, type SendInput } from "./outbound.ts";
 
@@ -31,8 +33,31 @@ export async function sendOutbound(
   env: Env,
   mailbox: MailboxRecord,
   input: SendInput,
-  options: { draftId?: string | null } = {},
+  options: { draftId?: string | null; userId?: string | null } = {},
 ): Promise<SendOutcome> {
+  if (options.userId) {
+    const user = await getUser(env, options.userId);
+    if (user) {
+      const quota = await checkSendQuota(env, user);
+      if (quota) {
+        const attempt = await persist(env, mailbox.id, {
+          from: outboundFromAddress(env, mailbox.address),
+          to: input.to,
+          cc: input.cc || undefined,
+          subject: input.subject,
+          text: input.text,
+        }, {
+          provider: (env.OUTBOUND_PROVIDER ?? "").trim() || "unset",
+          status: "failed",
+          error: quota.error,
+          hint: quota.hint,
+          providerMessageId: null,
+        });
+        return { attempt, httpStatus: 429, sent: null };
+      }
+    }
+  }
+
   const from = outboundFromAddress(env, mailbox.address);
   const headers: OutboundDraft["headers"] = {};
   if (input.inReplyTo) {
@@ -72,6 +97,9 @@ export async function sendOutbound(
       providerMessageId: result.providerMessageId ?? null,
     });
     const sent = await recordSent(env, mailbox, input, options.draftId);
+    if (options.userId) {
+      await incrementSendUsage(env, options.userId);
+    }
     return { attempt, httpStatus: 200, sent };
   }
 

@@ -188,7 +188,7 @@ test("requireOwner / requireAdmin helpers match the HTTP surface", async () => {
   );
   assert.equal(owner.ok, true);
 
-  const admin = requireAdmin(
+  const admin = await requireAdmin(
     new Request("http://127.0.0.1:8787/x", {
       headers: { authorization: `Bearer ${ADMIN}` },
     }),

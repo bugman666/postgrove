@@ -771,6 +771,80 @@ textarea:focus-visible {
   align-items: flex-start;
 }
 
+.page-inner-wide {
+  max-width: 960px;
+}
+
+.grove-panel {
+  margin: 0 0 var(--pg-space-6);
+}
+
+.grove-panel h2 {
+  margin: 0 0 var(--pg-space-3);
+  color: var(--pg-color-brand);
+  font-size: var(--pg-text-lg);
+}
+
+.table-wrap {
+  overflow-x: auto;
+  margin: 0 0 var(--pg-space-4);
+}
+
+.grove-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--pg-text-sm);
+}
+
+.grove-table th,
+.grove-table td {
+  text-align: left;
+  padding: var(--pg-space-2) var(--pg-space-3);
+  border-bottom: 1px solid var(--pg-color-border);
+  vertical-align: top;
+}
+
+.grove-table th {
+  color: var(--pg-color-text-secondary);
+  font-weight: 650;
+}
+
+.grove-table .mono {
+  font-family: var(--pg-font-mono);
+  font-size: var(--pg-text-xs);
+}
+
+.grove-table .quota-cell {
+  color: var(--pg-color-text-secondary);
+  font-size: var(--pg-text-xs);
+}
+
+.grove-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: var(--pg-space-3);
+  align-items: end;
+}
+
+.grove-form label {
+  display: flex;
+  flex-direction: column;
+  gap: var(--pg-space-1);
+  font-size: var(--pg-text-sm);
+  color: var(--pg-color-text-secondary);
+}
+
+.grove-form select,
+.grove-form input[type="number"] {
+  min-height: 44px;
+  padding: 0 var(--pg-space-3);
+  border: 1px solid var(--pg-color-border);
+  border-radius: var(--pg-radius-sm);
+  background: var(--pg-color-bg);
+  color: var(--pg-color-text);
+  font: inherit;
+}
+
 @media (min-width: 960px) {
   .folder-strip {
     display: none;

@@ -1,6 +1,6 @@
 import type { Env } from "./env";
 
-const REQUIRED_TABLES = ["mailboxes", "messages", "outbound_attempts"] as const;
+const REQUIRED_TABLES = ["mailboxes", "messages", "outbound_attempts", "api_tokens", "users"] as const;
 
 export async function handleHealth(env: Env): Promise<Response> {
   const headers = {
@@ -11,7 +11,7 @@ export async function handleHealth(env: Env): Promise<Response> {
   try {
     const rows = await env.DB.prepare(
       `SELECT name FROM sqlite_master
-       WHERE type = 'table' AND name IN ('mailboxes', 'messages', 'outbound_attempts')`,
+       WHERE type = 'table' AND name IN ('mailboxes', 'messages', 'outbound_attempts', 'api_tokens', 'users')`,
     ).all<{ name: string }>();
 
     const present = new Set((rows.results ?? []).map((row) => row.name));

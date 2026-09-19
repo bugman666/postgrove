@@ -8,13 +8,21 @@
 #   curl -b /tmp/pg-cookies http://127.0.0.1:8787/auth/session
 #   curl -H 'Authorization: Bearer change-me-local-admin-token' \
 #     http://127.0.0.1:8787/admin/ping
+#   curl -H 'Authorization: Bearer change-me-local-admin-token' \
+#     http://127.0.0.1:8787/admin/users
+# Member login (seeded grove / empty@example.test):
+#   curl -c /tmp/pg-user -X POST http://127.0.0.1:8787/auth/login \
+#     -H 'content-type: application/json' \
+#     -d '{"address":"empty@example.test","token":"change-me-local-user-token"}'
 #
 # Production: `npx wrangler secret put SESSION_SECRET` (and OWNER_TOKEN, ADMIN_TOKEN,
 # plus RESEND_API_KEY when OUTBOUND_PROVIDER=resend).
 # Do not reuse these placeholders remotely.
 #
 # OWNER_TOKEN is one shared secret for every mailbox — not a per-address password.
-# Anyone who has it can open any active address. Per-user passwords wait for multi-user.
+# Anyone who has it can open any active address (break-glass / deploy owner).
+# Mailbox members use their own token (issued on POST /admin/users).
+# ADMIN_TOKEN (or an admin-role member session) opens /admin.
 #
 # SESSION_SECRET signs the owner cookie. Sessions are stateless HMAC tokens: logout
 # only clears the browser cookie. Rotate SESSION_SECRET (and restart / redeploy)

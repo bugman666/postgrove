@@ -4,7 +4,7 @@ import {
   renderAttachmentsHtml,
   type AttachmentRecord,
 } from "./attachments";
-import { requireOwner, type OwnerPrincipal } from "./auth";
+import { actorUserId, requireOwner, type MailboxActor } from "./auth";
 import {
   FOLDER_EMPTY,
   FOLDER_LABELS,
@@ -27,6 +27,7 @@ import {
 import { parseSendFields, sendOutbound } from "./send";
 import {
   countUnreadInbox,
+  createMailbox,
   getInboxMessage,
   getMailbox,
   getMailboxMessage,
@@ -34,7 +35,9 @@ import {
   insertDraft,
   listFolderMessages,
   listInboxMessages,
+  listMailboxesForUser,
   listOutboundAttempts,
+  MailboxInputError,
   markRead,
   moveMessage,
   setRead,
@@ -45,6 +48,8 @@ import {
   type MessageRecord,
   type OutboundAttemptRecord,
 } from "./store";
+import { checkAddressQuota } from "./quotas.ts";
+import { bindUserMailbox, getUser, mailboxAllowed } from "./users.ts";
 import {
   findThreadById,
   findThreadForMessage,
@@ -55,7 +60,7 @@ import {
 } from "./threads";
 import { parseInboxFilter, parseSearchQuery, type InboxFilter } from "./triage";
 
-type NavId = SystemFolder | "unread" | "compose" | "addresses" | "settings";
+type NavId = SystemFolder | "unread" | "compose" | "addresses" | "settings" | "admin";
 
 interface ComposeForm {
   to: string;
@@ -77,7 +82,7 @@ export async function handleUi(
     return unauthorizedPage(gate.response);
   }
 
-  const owner = gate.principal;
+  const owner: MailboxActor = gate.principal;
   const path = url.pathname;
   const method = request.method;
   const ownMailbox = await getMailbox(env, owner.mailboxId);
@@ -104,10 +109,14 @@ export async function handleUi(
   }
 
   if (path === "/addresses") {
+    if (method === "POST") {
+      return handleAddressCreate(request, env, owner, unreadCount);
+    }
     if (method !== "GET") {
       return pageMethodNotAllowed();
     }
-    return html(renderAddressesPage(ownMailbox ? [ownMailbox] : [], "addresses", unreadCount));
+    const boxes = await visibleUiMailboxes(env, owner, ownMailbox);
+    return html(renderAddressesPage(boxes, "addresses", unreadCount, url.searchParams.get("error")));
   }
 
   if (path === "/settings") {
@@ -115,10 +124,14 @@ export async function handleUi(
       return pageMethodNotAllowed();
     }
     return html(renderStubPage("settings", "设置", ownMailbox, [
-      "会话绑在你登录的地址上。登出后需要再次 POST /auth/login。",
+      owner.kind === "mailbox"
+        ? `你是成员 ${owner.userId}（${owner.role === "admin" ? "值守" : "信箱"}）。会话可打开已绑定的地址。`
+        : "这是主人会话（OWNER_TOKEN）。只绑在你登录的那一个地址上。",
+      "登出后需要再次 POST /auth/login。成员口令由值守发放，不是 OWNER_TOKEN。",
       "还没收到信？确认 Email Routing 已指向本 Worker。",
       describeOutbound(env).hint,
-      "入站附件存在 R2。单文件上限见 ATTACHMENT_MAX_BYTES（默认 10 MB），数量上限见 ATTACHMENT_MAX_COUNT（默认 10）。出站写信带附件是后续工作。",
+      "入站附件存在 R2。单文件上限见 ATTACHMENT_MAX_BYTES（默认 10 MB）。成员还有地址 / 存储 / 日发送配额；超了会明确报错。",
+      "值守台在 /admin：ADMIN_TOKEN 或 admin 角色。普通成员进不去。",
     ], true, unreadCount));
   }
 
@@ -324,17 +337,60 @@ export async function handleUi(
 
 async function allowedMailbox(
   env: Env,
-  owner: OwnerPrincipal,
+  owner: MailboxActor,
   idOrAddress: string,
 ): Promise<MailboxRecord | null> {
   const mailbox = await getMailbox(env, idOrAddress);
   if (!mailbox) {
     return null;
   }
-  if (mailbox.id !== owner.mailboxId && mailbox.address !== owner.address) {
+  if (!mailboxAllowed(owner, mailbox)) {
     return null;
   }
   return mailbox;
+}
+
+async function visibleUiMailboxes(
+  env: Env,
+  owner: MailboxActor,
+  ownMailbox: MailboxRecord | null,
+): Promise<MailboxRecord[]> {
+  if (owner.kind === "mailbox") {
+    return listMailboxesForUser(env, owner.userId);
+  }
+  return ownMailbox ? [ownMailbox] : [];
+}
+
+async function handleAddressCreate(
+  request: Request,
+  env: Env,
+  owner: MailboxActor,
+  unreadCount: number,
+): Promise<Response> {
+  const boxes = await visibleUiMailboxes(env, owner, await getMailbox(env, owner.mailboxId));
+  const data = await request.formData();
+  const address = stringField(data.get("address"));
+  const displayName = stringField(data.get("display_name"));
+  const userId = actorUserId(owner);
+  if (userId) {
+    const user = await getUser(env, userId);
+    if (user) {
+      const quota = await checkAddressQuota(env, user);
+      if (quota) {
+        return html(renderAddressesPage(boxes, "addresses", unreadCount, quota.hint), 409);
+      }
+    }
+  }
+  try {
+    const mailbox = await createMailbox(env, { address, displayName: displayName || null });
+    if (userId) {
+      await bindUserMailbox(env, userId, mailbox.id);
+    }
+    return redirect(`/addresses?created=1`);
+  } catch (error) {
+    const hint = error instanceof MailboxInputError ? error.message : "没能开这个地址。";
+    return html(renderAddressesPage(boxes, "addresses", unreadCount, hint), 400);
+  }
 }
 
 async function unauthorizedPage(authResponse: Response): Promise<Response> {
@@ -365,7 +421,7 @@ async function handleComposeSubmit(
   request: Request,
   env: Env,
   url: URL,
-  owner: OwnerPrincipal,
+  owner: MailboxActor,
   ownMailbox: MailboxRecord | null,
   unreadCount: number,
 ): Promise<Response> {
@@ -380,7 +436,7 @@ async function handleComposeSubmit(
       404,
     );
   }
-  if (ownMailbox.id !== owner.mailboxId && ownMailbox.address !== owner.address) {
+  if (!mailboxAllowed(owner, ownMailbox)) {
     return forbiddenOrMissing(ownMailbox, unreadCount);
   }
 
@@ -458,6 +514,7 @@ async function handleComposeSubmit(
 
   const outcome = await sendOutbound(env, ownMailbox, parsed.input, {
     draftId: form.draftId || null,
+    userId: actorUserId(owner),
   });
   if (outcome.sent) {
     const next = new URL(boxPath(ownMailbox.id, "sent"), url.origin);
@@ -1273,12 +1330,27 @@ function renderAttemptHistory(
   </section>`;
 }
 
-function renderAddressesPage(mailboxes: MailboxRecord[], nav: NavId, unreadCount = 0): string {
+function renderAddressesPage(
+  mailboxes: MailboxRecord[],
+  nav: NavId,
+  unreadCount = 0,
+  error: string | null = null,
+): string {
   const current = mailboxes[0] ?? null;
+  const banner = error ? `<p class="banner danger">${escapeHtml(error)}</p>` : "";
+  const form = `<form class="grove-form" method="post" action="/addresses">
+      <label>新地址
+        <input class="search" name="address" type="email" required placeholder="notes@example.test">
+      </label>
+      <label>名称
+        <input class="search" name="display_name" placeholder="可选">
+      </label>
+      <button class="btn btn-primary" type="submit">开一个地址</button>
+    </form>
+    <p class="banner">主人会话开地址不占成员配额。成员会话会记入该成员的地址配额，超了会明确报错。</p>`;
   let content: string;
   if (mailboxes.length === 0) {
-    content = `${emptyBlock("还没有地址。创建一个，例如 you@yourdomain。")}
-      <p class="banner">创建地址尚未接通。</p>`;
+    content = `${emptyBlock("还没有地址。开一个，例如 you@yourdomain。")}${form}`;
   } else {
     content = `<ul class="addr-list">${mailboxes
       .map(
@@ -1289,7 +1361,7 @@ function renderAddressesPage(mailboxes: MailboxRecord[], nav: NavId, unreadCount
         </a>
       </li>`,
       )
-      .join("")}</ul>`;
+      .join("")}</ul>${form}`;
   }
   return layout({
     title: "地址 · Postgrove",
@@ -1300,7 +1372,7 @@ function renderAddressesPage(mailboxes: MailboxRecord[], nav: NavId, unreadCount
     unreadCount,
     body: `<main class="page"><div class="page-inner">
       <div class="page-head"><h1>地址</h1></div>
-      <div class="page-card">${content}</div>
+      <div class="page-card">${banner}${content}</div>
     </div></main>`,
   });
 }
@@ -1497,6 +1569,7 @@ function layout(opts: {
       <ul class="nav-list nav-tools">
         <li><a class="${opts.nav === "compose" ? "active" : ""}" href="${escapeHtml(compose)}">写信</a></li>
         <li><a class="${opts.nav === "addresses" ? "active" : ""}" href="/addresses">地址</a></li>
+        <li><a class="${opts.nav === "admin" ? "active" : ""}" href="/admin">值守</a></li>
         <li><a class="${opts.nav === "settings" ? "active" : ""}" href="${escapeHtml(settings)}">设置</a></li>
       </ul>
       ${chip}

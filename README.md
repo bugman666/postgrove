@@ -29,7 +29,7 @@ Open addresses on a domain you own, receive mail at the edge, read it in a web i
 - Throwaway / anonymous mailboxes
 - Calendar, contacts, or replacing a full IMAP/SMTP stack
 - Attachments on send
-- Multi-user / RBAC / per-address passwords (one shared `OWNER_TOKEN` until then)
+- Per-address passwords as a replacement for `OWNER_TOKEN` (owner token stays as break-glass; members have their own tokens)
 
 ## Stack (intended)
 
@@ -57,7 +57,7 @@ See Issues under milestones `P0-MVP` … `P3-dev-api`. Longer write-ups: [produc
 
 ## Status
 
-P0 inbox on the Worker: list / read / delete against D1, inbound attachments in R2, plus compose/send behind the owner session. Search (LIKE on from / subject / body), unread toggle with a nav count, and star/flag are in. System folders (inbox / sent / drafts / trash / spam) use the existing `messages.folder` column; drafts save and resume on `/compose`. Outbound is pluggable (`stub` / `resend` / `http`). Reply / reply-all / forward prefill compose and send through the same adapters (In-Reply-To / References on reply). The inbox list groups related mail into basic threads (count on the row; open expands in time order). Mailbox-scoped REST tokens live under `/api/v1` (hash at rest, `Authorization: Bearer pg_…`). Public signup is **off** unless Turnstile is configured. Outbound send attachments are a later follow-up. Light-editorial brand art (paper + forest green) lives in [`docs/assets/`](docs/assets/).
+P0 inbox on the Worker: list / read / delete against D1, inbound attachments in R2, plus compose/send behind the owner session. Search (LIKE on from / subject / body), unread toggle with a nav count, and star/flag are in. System folders (inbox / sent / drafts / trash / spam) use the existing `messages.folder` column; drafts save and resume on `/compose`. Outbound is pluggable (`stub` / `resend` / `http`). Reply / reply-all / forward prefill compose and send through the same adapters (In-Reply-To / References on reply). The inbox list groups related mail into basic threads (count on the row; open expands in time order). Mailbox-scoped REST tokens live under `/api/v1` (hash at rest, `Authorization: Bearer pg_…`). Public signup is **off** unless Turnstile is configured. Small-team members (`users` + `user_mailboxes`) have address / storage / daily-send quotas; `/admin` is a forest-token 值守台 (ADMIN_TOKEN or admin role). Outbound send attachments are a later follow-up. Light-editorial brand art (paper + forest green) lives in [`docs/assets/`](docs/assets/).
 
 ## Local development
 
@@ -85,7 +85,7 @@ Seeded addresses:
 | Address | What you should see after login |
 |---------|---------------------|
 | `inbox@example.test` | Inbox samples plus one draft, one sent, one trash, and one spam row; includes an attachment, a cited reply thread (本周同步), and a subject-fallback pair (办公室钥匙) |
-| `empty@example.test` | Empty-inbox copy |
+| `empty@example.test` | Empty-inbox copy. Seeded member `grove` can log in here with `change-me-local-user-token` |
 
 Direct links (same origin as `wrangler dev`):
 
@@ -273,7 +273,15 @@ Open [http://127.0.0.1:8787/compose](http://127.0.0.1:8787/compose) while signed
 
 Design: **owner = signed HttpOnly session cookie** after `POST /auth/login`. **Admin = `Authorization: Bearer <ADMIN_TOKEN>`**. Inbox HTML and JSON call `requireOwner` from `src/auth.ts`.
 
-**Shared `OWNER_TOKEN` vs per-address passwords.** There is one shared `OWNER_TOKEN` for every mailbox. It is not a per-address password. Anyone who has the token can log in as any active address; the session cookie is then bound to that address. Per-user / per-mailbox passwords wait for multi-user (P2). Treat `OWNER_TOKEN` like a deploy secret, not a login you share with guests.
+**Three roles (small-team, not an ACL matrix).**
+
+| Role | How you sign in | What you can do |
+|------|-----------------|-----------------|
+| **Owner** | `POST /auth/login` with any active address + `OWNER_TOKEN` | Inbox for that address only. Break-glass deploy secret. |
+| **Admin** | `Authorization: Bearer <ADMIN_TOKEN>`, `POST /admin/session`, or a `users.role=admin` member session | List/create/disable members, open addresses, read-only mail audit. Admin users skip per-user quotas (`0` = unlimited). |
+| **Mailbox user** | `POST /auth/login` with a bound address + that member's token | Only mailboxes listed in `user_mailboxes`. Creating addresses / storing inbound / sending are quota-checked. |
+
+**Shared `OWNER_TOKEN` vs member tokens.** `OWNER_TOKEN` is still one shared secret for every mailbox — not a per-address password. Treat it like a deploy secret. Members get their own token from `POST /admin/users` (returned once). A disabled member cannot keep using an old cookie (`user_disabled`).
 
 Copy `.dev.vars.example` to `.dev.vars` (gitignored). The example values work locally; change them before any remote deploy and set the same names with `npx wrangler secret put`.
 
@@ -309,22 +317,47 @@ curl -i -c /tmp/pg-cookies -X POST http://127.0.0.1:8787/auth/logout
 
 **CSRF (cookie + SameSite=Lax + Origin check).** The session cookie is `HttpOnly`, `SameSite=Lax`, and `Secure` on HTTPS. Cross-site form POSTs therefore do not send it on modern browsers. Cookie-authenticated writes (`POST /auth/logout`, inbox delete, `POST /compose`, `POST /api/send`, `DELETE /api/messages/…`, anything else that calls `requireOwner` with POST/PUT/PATCH/DELETE) also require `Origin` (or `Referer` if `Origin` is missing) to match this Worker. Same-origin HTML forms and `fetch` already send `Origin`, so the inbox and compose UI did not need a rewrite. Missing both headers is allowed for curl and scripts. That is enough for this MVP.
 
-Still open for P2: a required custom header or double-submit token (so missing-`Origin` clients cannot be used as a CSRF hole), CSRF on GET side effects (mark-as-read), per-address passwords, and an expiring admin bearer.
+Still open later: a required custom header or double-submit token (so missing-`Origin` clients cannot be used as a CSRF hole), CSRF on GET side effects (mark-as-read), and an expiring admin bearer.
 
-Admin stub (later mailbox-management routes can reuse `requireAdmin`):
+Admin JSON (reuse `requireAdmin` — bearer, admin cookie, or admin-role member):
 
 ```bash
 curl -sS -H 'Authorization: Bearer change-me-local-admin-token' \
   http://127.0.0.1:8787/admin/ping
+curl -sS -H 'Authorization: Bearer change-me-local-admin-token' \
+  http://127.0.0.1:8787/admin/users
+curl -sS -H 'Authorization: Bearer change-me-local-admin-token' \
+  -X POST http://127.0.0.1:8787/admin/users \
+  -H 'content-type: application/json' \
+  -d '{"login":"ada","role":"mailbox","quota_addresses":3,"quota_storage_bytes":104857600,"quota_send_daily":50,"mailbox":"ada@example.test"}'
+curl -sS -H 'Authorization: Bearer change-me-local-admin-token' \
+  http://127.0.0.1:8787/admin/mailboxes
+curl -sS -H 'Authorization: Bearer change-me-local-admin-token' \
+  http://127.0.0.1:8787/admin/messages
 ```
 
-Expect `"role": "admin"`. A missing or wrong bearer returns **401**. Admin is a bearer token, not a cookie, so browser CSRF does not apply the same way. It also does not expire — treat a leaked `ADMIN_TOKEN` as “rotate now”.
+Expect `"role": "admin"` on ping. A missing bearer/cookie returns **401**. A mailbox/owner session on `/admin/users` returns **403**. Admin bearer is not a cookie, so browser CSRF does not apply the same way; cookie admin writes still check Origin. A leaked `ADMIN_TOKEN` means rotate now.
+
+Browser: [http://127.0.0.1:8787/admin](http://127.0.0.1:8787/admin) is the 值守台 (paper + forest, not an Element admin clone). Paste `ADMIN_TOKEN` or sign in as an admin-role member.
+
+Member login (seeded `grove` on `empty@example.test`):
+
+```bash
+curl -i -c /tmp/pg-user -X POST http://127.0.0.1:8787/auth/login \
+  -H 'content-type: application/json' \
+  -d '{"address":"empty@example.test","token":"change-me-local-user-token"}'
+curl -sS -b /tmp/pg-user -X POST http://127.0.0.1:8787/api/addresses \
+  -H 'content-type: application/json' \
+  -d '{"address":"notes@example.test"}'
+```
+
+Quota errors are loud: `quota_addresses` **409**, `quota_storage` **409** (inbound `setReject` uses the same hint), `quota_send` **429**. `0` on a quota column means unlimited.
 
 ### Open REST API (`/api/v1`) + abuse controls
 
 Token API for automating address and mail ops. Cookie owner `/api/*` (inbox UI JSON) is unchanged and still uses `requireOwner`.
 
-**Tokens are mailbox-scoped.** They bind to `mailbox_id` (today's owner/mailbox model). There is no users table here — multi-user / RBAC is a separate change. A token hashed at rest (`SHA-256`) looks like `pg_…`. Only the hash is stored. The plaintext secret is shown **once** at mint time.
+**Tokens are mailbox-scoped.** They bind to `mailbox_id`. A token hashed at rest (`SHA-256`) looks like `pg_…`. Only the hash is stored. The plaintext secret is shown **once** at mint time. Member sessions (`users` + `user_mailboxes`) are a separate cookie path; a `pg_` token does not impersonate a member role.
 
 Mint (owner session, bound to the logged-in mailbox):
 
@@ -449,11 +482,14 @@ Then, in the Cloudflare dashboard, enable Email Routing for your domain and add 
 | Path | Role |
 |------|------|
 | `src/index.ts` | Worker `fetch` + `email` handlers |
-| `src/auth.ts` | Owner session + admin bearer; `requireOwner` / `requireAdmin` |
+| `src/auth.ts` | Owner session + member session + admin bearer/cookie; `requireOwner` / `requireAdmin` |
 | `src/rest.ts` | Token REST `/api/v1` + public signup + admin mint |
 | `src/api-tokens.ts` | Opaque `pg_…` tokens (hash at rest, mailbox-scoped) |
 | `src/turnstile.ts` | Cloudflare siteverify (public signup only when configured) |
 | `src/rate-limit.ts` | In-memory limiter for token API + signup |
+| `src/users.ts` | Members, token hash, mailbox bindings |
+| `src/quotas.ts` | Address / storage / daily-send checks (`0` = unlimited) |
+| `src/admin.ts` | `/admin` 值守台 + JSON users / mailboxes / audit |
 | `src/health.ts` | `GET /healthz` |
 | `src/inbound.ts` | Email Routing stub persist + attachment limits |
 | `src/attachment-limits.ts` | Size / count caps and human-readable over-limit errors |
@@ -474,6 +510,7 @@ Then, in the Cloudflare dashboard, enable Email Routing for your domain and add 
 | `migrations/0006_message_star.sql` | `messages.is_starred` + unread / star indexes |
 | `migrations/0007_mailbox_folders.sql` | Folder / draft indexes (P1) |
 | `migrations/0008_api_tokens.sql` | Mailbox-scoped API tokens (hash at rest) |
+| `migrations/0008_users_rbac_quotas.sql` | `users`, `user_mailboxes`, `send_usage` |
 | `scripts/seed-local.sql` | Local sample mailboxes + messages (not for remote) |
 | `scripts/seed-grove-note.txt` | Local sample attachment bytes |
 | `wrangler.jsonc` | Worker + D1 + R2 bindings (placeholders) |
