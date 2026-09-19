@@ -1,5 +1,6 @@
--- Local-only sample mailbox for wrangler / inbound stub tests.
+-- Local-only sample mailboxes and messages for wrangler / inbox tests.
 -- Do not apply this file to a remote database.
+
 INSERT OR IGNORE INTO mailboxes (
   id,
   address,
@@ -16,6 +17,124 @@ INSERT OR IGNORE INTO mailboxes (
   'example.test',
   'Local inbox',
   'active',
+  1789815600000,
+  1789815600000
+);
+
+INSERT OR IGNORE INTO mailboxes (
+  id,
+  address,
+  local_part,
+  domain,
+  display_name,
+  status,
+  created_at,
+  updated_at
+) VALUES (
+  '11111111-1111-4111-8111-111111111112',
+  'empty@example.test',
+  'empty',
+  'example.test',
+  'Empty box',
+  'active',
+  1789815601000,
+  1789815601000
+);
+
+INSERT OR IGNORE INTO messages (
+  id,
+  mailbox_id,
+  rfc_message_id,
+  envelope_from,
+  envelope_to,
+  subject,
+  snippet,
+  body_text,
+  size_bytes,
+  is_read,
+  folder,
+  received_at,
+  created_at
+) VALUES (
+  '22222222-2222-4222-8222-222222222221',
+  '11111111-1111-4111-8111-111111111111',
+  '<seed-welcome@example.test>',
+  'neighbor@example.test',
+  'inbox@example.test',
+  '欢迎使用本地收件箱',
+  '这是一封已读的种子信，用来核对阅读页正文。',
+  '你好，
+
+这是一封已读的种子信，用来核对阅读页正文。
+
+打开后应保持已读；删除后会离开收件箱（进入垃圾箱，本阶段不提供垃圾箱界面）。',
+  220,
+  1,
+  'inbox',
+  1789812000000,
+  1789812000000
+);
+
+INSERT OR IGNORE INTO messages (
+  id,
+  mailbox_id,
+  rfc_message_id,
+  envelope_from,
+  envelope_to,
+  subject,
+  snippet,
+  body_text,
+  size_bytes,
+  is_read,
+  folder,
+  received_at,
+  created_at
+) VALUES (
+  '22222222-2222-4222-8222-222222222222',
+  '11111111-1111-4111-8111-111111111111',
+  '<seed-invoice@example.test>',
+  'billing@grove.test',
+  'inbox@example.test',
+  '本月账单已出',
+  '本地种子：未读、有发件人、主题和时间，便于核对立列表。',
+  '本地种子：未读、有发件人、主题和时间，便于核对立列表。
+
+金额与账号均为虚构，不会产生真实扣款。',
+  180,
+  0,
+  'inbox',
+  1789813800000,
+  1789813800000
+);
+
+INSERT OR IGNORE INTO messages (
+  id,
+  mailbox_id,
+  rfc_message_id,
+  envelope_from,
+  envelope_to,
+  subject,
+  snippet,
+  body_text,
+  size_bytes,
+  is_read,
+  folder,
+  received_at,
+  created_at
+) VALUES (
+  '22222222-2222-4222-8222-222222222223',
+  '11111111-1111-4111-8111-111111111111',
+  '<seed-code@example.test>',
+  'noreply@verify.test',
+  'inbox@example.test',
+  '你的确认码',
+  '确认码 482193。这是未读种子信，打开后应变为已读。',
+  '确认码 482193。
+
+这是未读种子信，打开后应变为已读。回复按钮只是入口，不会发出邮件。',
+  160,
+  0,
+  'inbox',
   1789815600000,
   1789815600000
 );
