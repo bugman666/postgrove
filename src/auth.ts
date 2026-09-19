@@ -1,5 +1,11 @@
 import { findApiTokenByHash, hashApiToken, looksLikeApiToken } from "./api-tokens.ts";
 import type { Env } from "./env";
+import {
+  clientKey,
+  consumeRateLimit,
+  loginRateLimitConfig,
+  resetRateLimitForTests,
+} from "./rate-limit.ts";
 import { describeAuthMode, findUserByMailboxToken, getUser, listUserMailboxIds } from "./users.ts";
 
 /** Cookie Inbox and other Worker routes should send after owner login. */
@@ -10,21 +16,12 @@ export const ADMIN_SESSION_COOKIE = "postgrove_admin";
 /** Owner session lifetime. Rotate SESSION_SECRET to revoke all sessions. */
 export const SESSION_MAX_AGE_SECONDS = 7 * 24 * 60 * 60;
 
-/** Login attempts allowed per IP per window. In-memory, per Worker isolate. */
-export const LOGIN_RATE_LIMIT_MAX = 8;
-/** Fixed window for POST /auth/login (10 minutes). */
-export const LOGIN_RATE_LIMIT_WINDOW_MS = 10 * 60 * 1000;
+export { LOGIN_RATE_LIMIT_MAX, LOGIN_RATE_LIMIT_WINDOW_MS } from "./rate-limit.ts";
 
 const SESSION_VERSION = 1;
 const MIN_SESSION_SECRET_LENGTH = 16;
 const MIN_TOKEN_LENGTH = 8;
 const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
-const RATE_LIMIT_PRUNE_AT = 512;
-
-type LoginRateBucket = { count: number; resetAt: number };
-
-/** Best-effort per-isolate counters. A new isolate starts a fresh window. */
-const loginAttempts = new Map<string, LoginRateBucket>();
 
 const JSON_HEADERS = {
   "content-type": "application/json; charset=utf-8",
@@ -84,7 +81,7 @@ interface SessionPayload {
  * or POST /admin/session { token: ADMIN_TOKEN } → postgrove_admin cookie.
  * Use `requireAdmin`. Missing credentials → 401; mailbox/owner session → 403.
  *
- * Login is rate-limited per IP. Cookie-authenticated writes also check Origin
+ * Login is rate-limited per IP (shared KV when RATE_LIMIT is bound). Cookie-authenticated writes also check Origin
  * (or Referer) against this Worker. Rotate SESSION_SECRET to revoke all sessions.
  */
 export async function handleAuthRoutes(
@@ -474,7 +471,7 @@ async function handleLogin(request: Request, env: Env): Promise<Response> {
     return owner.response;
   }
 
-  const limited = consumeLoginAttempt(request);
+  const limited = await consumeRateLimit(env, `login:${clientKey(request)}`, loginRateLimitConfig());
   if (!limited.ok) {
     return limited.response;
   }
@@ -647,7 +644,7 @@ async function handleAdminLogin(request: Request, env: Env): Promise<Response> {
     return admin.response;
   }
 
-  const limited = consumeLoginAttempt(request);
+  const limited = await consumeRateLimit(env, `login:${clientKey(request)}`, loginRateLimitConfig());
   if (!limited.ok) {
     return limited.response;
   }
@@ -771,63 +768,9 @@ function originsEqual(left: string, right: string): boolean {
   }
 }
 
-function consumeLoginAttempt(
-  request: Request,
-  now = Date.now(),
-): { ok: true } | { ok: false; response: Response } {
-  const key = loginClientKey(request);
-  const existing = loginAttempts.get(key);
-  if (!existing || existing.resetAt <= now) {
-    loginAttempts.set(key, { count: 1, resetAt: now + LOGIN_RATE_LIMIT_WINDOW_MS });
-    pruneLoginAttempts(now);
-    return { ok: true };
-  }
-  if (existing.count >= LOGIN_RATE_LIMIT_MAX) {
-    const retryAfter = Math.max(1, Math.ceil((existing.resetAt - now) / 1000));
-    return {
-      ok: false,
-      response: json(
-        {
-          ok: false,
-          error: "rate_limited",
-          hint: `Too many login attempts from this network. Wait a few minutes and try again (${LOGIN_RATE_LIMIT_MAX} per ${LOGIN_RATE_LIMIT_WINDOW_MS / 60_000} minutes per IP).`,
-          retry_after_seconds: retryAfter,
-        },
-        429,
-        { "retry-after": String(retryAfter) },
-      ),
-    };
-  }
-  existing.count += 1;
-  return { ok: true };
-}
-
-function loginClientKey(request: Request): string {
-  const cf = request.headers.get("cf-connecting-ip")?.trim();
-  if (cf) {
-    return `ip:${cf}`;
-  }
-  const forwarded = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim();
-  if (forwarded) {
-    return `ip:${forwarded}`;
-  }
-  return "ip:unknown";
-}
-
-function pruneLoginAttempts(now: number): void {
-  if (loginAttempts.size < RATE_LIMIT_PRUNE_AT) {
-    return;
-  }
-  for (const [key, bucket] of loginAttempts) {
-    if (bucket.resetAt <= now) {
-      loginAttempts.delete(key);
-    }
-  }
-}
-
-/** Test helper: drop in-memory login counters. */
+/** Test helper: drop in-memory login / REST / signup counters. */
 export function resetLoginRateLimitForTests(): void {
-  loginAttempts.clear();
+  resetRateLimitForTests();
 }
 
 function sessionSecret(

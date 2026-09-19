@@ -160,7 +160,7 @@ async function handleV1(request: Request, env: Env, url: URL): Promise<Response>
     return gate.response;
   }
 
-  const limited = consumeRateLimit(restLimitKey(request, gate.principal), restConfig(env));
+  const limited = await consumeRateLimit(env, restLimitKey(request, gate.principal), restConfig(env));
   if (!limited.ok) {
     return limited.response;
   }
@@ -495,7 +495,7 @@ async function handlePublicSignup(request: Request, env: Env): Promise<Response>
     return oversize;
   }
 
-  const limited = consumeRateLimit(`signup:${clientKey(request)}`, signupConfig(env));
+  const limited = await consumeRateLimit(env, `signup:${clientKey(request)}`, signupConfig(env));
   if (!limited.ok) {
     return limited.response;
   }
