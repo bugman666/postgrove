@@ -12,8 +12,21 @@ import { handleInbound } from "./inbound";
 import { handleRestRoutes } from "./rest";
 import { APP_CSS } from "./styles";
 import { handleUi } from "./ui";
+import {
+  drainDueWebhookDeliveries,
+  type DrainWebhookOptions,
+  type WebhookDrainResult,
+} from "./webhooks.ts";
 
 export { requireAdmin, requireAdminOrOwner, requireOwner } from "./auth";
+
+/** Cron / test entry: drain due inbound webhook/forward deliveries. */
+export async function handleScheduled(
+  env: Env,
+  opts?: DrainWebhookOptions,
+): Promise<WebhookDrainResult> {
+  return drainDueWebhookDeliveries(env, opts);
+}
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -60,5 +73,13 @@ export default {
 
   async email(message: InboundEmail, env: Env): Promise<void> {
     await handleInbound(message, env);
+  },
+
+  async scheduled(
+    _controller: ScheduledController,
+    env: Env,
+    ctx: ExecutionContext,
+  ): Promise<void> {
+    ctx.waitUntil(drainDueWebhookDeliveries(env));
   },
 };

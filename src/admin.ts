@@ -38,8 +38,10 @@ import {
 } from "./users.ts";
 import {
   HookInputError,
+  drainDueWebhookDeliveries,
   getHookConfig,
   listDeliveries,
+  parseDeliveryStatus,
   parseHookConfigBody,
   publicDelivery,
   publicHookConfig,
@@ -153,6 +155,13 @@ export async function handleAdmin(
       return methodNotAllowed("GET");
     }
     return listAdminDeliveries(env, url);
+  }
+
+  if (path === "/admin/webhook-deliveries/drain") {
+    if (method !== "POST") {
+      return methodNotAllowed("POST");
+    }
+    return drainAdminWebhookDeliveries(env);
   }
 
   return notFoundJson();
@@ -562,12 +571,31 @@ async function listAdminDeliveries(env: Env, url: URL): Promise<Response> {
   const mailboxId = url.searchParams.get("mailbox_id")?.trim() || undefined;
   const rawLimit = Number(url.searchParams.get("limit") ?? "50");
   const limit = Number.isFinite(rawLimit) ? rawLimit : 50;
+  let status: ReturnType<typeof parseDeliveryStatus> = null;
   try {
-    const deliveries = await listDeliveries(env, mailboxId, limit);
+    status = parseDeliveryStatus(url.searchParams.get("status"));
+  } catch (error) {
+    if (error instanceof HookInputError) {
+      return json({ ok: false, error: error.error, hint: error.message }, 400);
+    }
+    throw error;
+  }
+  try {
+    const deliveries = await listDeliveries(env, mailboxId, limit, status);
     return json({
       ok: true,
+      status,
       deliveries: deliveries.map(publicDelivery),
     });
+  } catch (error) {
+    return migrateHint(error);
+  }
+}
+
+async function drainAdminWebhookDeliveries(env: Env): Promise<Response> {
+  try {
+    const drain = await drainDueWebhookDeliveries(env);
+    return json({ ok: true, drain });
   } catch (error) {
     return migrateHint(error);
   }
@@ -831,14 +859,18 @@ function renderAdminDashboard(
   const deliveryRows = deliveries.length
     ? deliveries
         .map((row) => {
-          const status = row.status === "sent" ? "已送达" : `失败 · ${row.error || "downstream_failed"}`;
+          const status = deliveryStatusLabel(row);
           const note = row.hint || (row.http_status ? `HTTP ${row.http_status}` : "—");
+          const attempts = `${row.attempt_count ?? 0}/${row.max_attempts ?? 5}`;
+          const next = row.status === "pending" && row.next_attempt_at
+            ? `下次 ${formatReceived(row.next_attempt_at)}`
+            : "";
           return `<tr>
             <td>${escapeHtml(formatReceived(row.created_at))}</td>
             <td>${escapeHtml(row.kind === "webhook" ? "webhook" : "转发")}</td>
             <td class="mono">${escapeHtml(row.target)}</td>
-            <td>${escapeHtml(status)}</td>
-            <td>${escapeHtml(note)}</td>
+            <td>${escapeHtml(status)}${next ? `<div class="mono">${escapeHtml(next)}</div>` : ""}</td>
+            <td>${escapeHtml(note)}<div class="mono">尝试 ${escapeHtml(attempts)}</div></td>
           </tr>`;
         })
         .join("")
@@ -916,13 +948,17 @@ function renderAdminDashboard(
 
         <section class="grove-panel">
           <h2>入站投递</h2>
-          <p class="banner">签名算法：HMAC-SHA256，签名串 <span class="mono">\${timestamp}.\${raw_json_body}</span>，头 <span class="mono">X-Postgrove-Signature: v1=&lt;hex&gt;</span>。内网 / 元数据 URL 会被拒绝。</p>
+          <p class="banner">签名算法：HMAC-SHA256，签名串 <span class="mono">\${timestamp}.\${raw_json_body}</span>，头 <span class="mono">X-Postgrove-Signature: v1=&lt;hex&gt;</span>。重试会重新签发时间戳（偏斜仍是 ±5 分钟）。内网 / 元数据 URL 每次重试都会再校验。</p>
           <div class="table-wrap">
             <table class="grove-table">
               <thead><tr><th>时间</th><th>种类</th><th>目标</th><th>状态</th><th>说明</th></tr></thead>
               <tbody>${deliveryRows}</tbody>
             </table>
           </div>
+          <p>
+            <button class="btn" id="drain-webhooks" type="button">立即重试到期投递</button>
+          </p>
+          <p id="drain-webhooks-msg" class="banner" hidden></p>
           <form id="save-hooks" class="grove-form">
             <label>地址 ID <input class="search" name="mailbox_id" required placeholder="UUID"></label>
             <label>Webhook URL <input class="search" name="webhook_url" placeholder="https://hooks.example.test/inbound"></label>
@@ -1044,6 +1080,23 @@ function renderAdminDashboard(
               setTimeout(function () { location.reload(); }, 1200);
             })
             .catch(function () { show("save-hooks-msg", "请求失败。", true); });
+        });
+      }
+      var drainBtn = document.getElementById("drain-webhooks");
+      if (drainBtn) {
+        drainBtn.addEventListener("click", function () {
+          fetch("/admin/webhook-deliveries/drain", { method: "POST" })
+            .then(function (res) { return res.json().then(function (body) { return { res: res, body: body }; }); })
+            .then(function (result) {
+              if (!result.res.ok) {
+                show("drain-webhooks-msg", result.body.hint || result.body.error, true);
+                return;
+              }
+              var drain = result.body.drain || {};
+              show("drain-webhooks-msg", "已处理到期投递：送达 " + (drain.sent || 0) + "，失败 " + (drain.failed || 0) + "，仍待重试 " + (drain.pending || 0) + "。", false);
+              setTimeout(function () { location.reload(); }, 800);
+            })
+            .catch(function () { show("drain-webhooks-msg", "请求失败。", true); });
         });
       }
       document.querySelectorAll("[data-user-status]").forEach(function (btn) {
@@ -1243,6 +1296,16 @@ function migrateHint(error: unknown): Response {
     },
     503,
   );
+}
+
+function deliveryStatusLabel(row: InboundDeliveryRecord): string {
+  if (row.status === "sent") {
+    return "已送达";
+  }
+  if (row.status === "pending") {
+    return `待重试 · ${row.error || "pending"}`;
+  }
+  return `失败 · ${row.error || "downstream_failed"}`;
 }
 
 function emptyLine(copy: string): string {

@@ -100,8 +100,24 @@ class MemoryStatement {
     }
     if (sql.includes("from inbound_deliveries")) {
       let rows = this.db.inbound_deliveries.slice();
-      if (sql.includes("where mailbox_id")) {
+      if (sql.includes("delivery_key =")) {
+        rows = rows.filter((row) => row.mailbox_id === a && row.delivery_key === this.binds[1]);
+      } else if (sql.includes("where id =")) {
+        rows = rows.filter((row) => row.id === a);
+      } else if (sql.includes("status = 'pending'") && sql.includes("next_attempt_at")) {
+        rows = rows.filter(
+          (row) =>
+            row.status === "pending" &&
+            row.next_attempt_at != null &&
+            Number(row.next_attempt_at) <= Number(a),
+        );
+        return rows.sort((left, right) => Number(left.next_attempt_at) - Number(right.next_attempt_at));
+      } else if (sql.includes("where mailbox_id") && sql.includes("status =")) {
+        rows = rows.filter((row) => row.mailbox_id === a && row.status === this.binds[1]);
+      } else if (sql.includes("where mailbox_id")) {
         rows = rows.filter((row) => row.mailbox_id === a);
+      } else if (sql.includes("where status =")) {
+        rows = rows.filter((row) => row.status === a);
       }
       return rows.sort((left, right) => Number(right.created_at) - Number(left.created_at));
     }
@@ -165,18 +181,57 @@ class MemoryStatement {
       return 1;
     }
     if (sql.startsWith("insert into inbound_deliveries")) {
+      const dup = this.db.inbound_deliveries.some(
+        (row) => row.mailbox_id === b[1] && row.delivery_key === b[10],
+      );
+      if (dup) {
+        throw new Error("UNIQUE constraint failed: inbound_deliveries.mailbox_id, inbound_deliveries.delivery_key");
+      }
       this.db.inbound_deliveries.unshift({
         id: b[0],
         mailbox_id: b[1],
         message_id: b[2],
         kind: b[3],
-        target: b[4],
-        status: b[5],
-        http_status: b[6],
-        error: b[7],
-        hint: b[8],
-        created_at: b[9],
+        channel: b[4],
+        target: b[5],
+        status: b[6],
+        http_status: b[7],
+        error: b[8],
+        hint: b[9],
+        delivery_key: b[10],
+        attempt_count: b[11],
+        max_attempts: b[12],
+        next_attempt_at: b[13],
+        last_attempt_at: b[14],
+        payload_json: b[15],
+        created_at: b[16],
+        updated_at: b[17],
       });
+      return 1;
+    }
+    if (sql.startsWith("update inbound_deliveries")) {
+      const row = this.db.inbound_deliveries.find((item) => item.id === b[0]);
+      if (!row) {
+        return 0;
+      }
+      if (sql.includes("where id =") && sql.includes("status = 'pending'")) {
+        if (row.status !== "pending" || row.next_attempt_at == null || Number(row.next_attempt_at) > Number(b[2])) {
+          return 0;
+        }
+        row.next_attempt_at = b[1];
+        row.updated_at = b[2];
+        return 1;
+      }
+      row.target = b[1];
+      row.status = b[2];
+      row.http_status = b[3];
+      row.error = b[4];
+      row.hint = b[5];
+      row.attempt_count = b[6];
+      row.next_attempt_at = b[7];
+      row.last_attempt_at = b[8];
+      row.payload_json = b[9];
+      row.updated_at = b[10];
       return 1;
     }
     if (sql.startsWith("insert into messages")) {
@@ -327,6 +382,8 @@ test("TC11.1 inbound POSTs signed payload to configured webhook", async () => {
   assert.ok(posted);
   const payload = JSON.parse(posted.body) as {
     event: string;
+    event_id: string;
+    delivery_id: string;
     from: string;
     to: string;
     subject: string;
@@ -335,6 +392,9 @@ test("TC11.1 inbound POSTs signed payload to configured webhook", async () => {
   assert.equal(payload.to, INBOX.address);
   assert.equal(payload.from, "neighbor@example.test");
   assert.equal(payload.subject, "webhook ping");
+  assert.ok(payload.delivery_id);
+  assert.ok(payload.event_id);
+  assert.equal(payload.delivery_id, db.inbound_deliveries[0]?.id);
   const verified = await verifyWebhookSignature({
     secret: HOOK_SECRET,
     timestamp: posted.headers.get("x-postgrove-timestamp") ?? "",
@@ -444,8 +504,10 @@ test("TC11.4 downstream failure is stored and visible to admin", async () => {
     text: "x",
     receivedAt: Date.now(),
   });
-  assert.equal(db.inbound_deliveries[0]?.status, "failed");
+  assert.equal(db.inbound_deliveries[0]?.status, "pending");
   assert.equal(db.inbound_deliveries[0]?.error, "downstream_failed");
+  assert.equal(db.inbound_deliveries[0]?.attempt_count, 1);
+  assert.ok(Number(db.inbound_deliveries[0]?.next_attempt_at) > Date.now() - 1000);
   assert.match(String(db.inbound_deliveries[0]?.hint), /502|not swallowed|Check/i);
 
   const response = await handleAdmin(
@@ -459,8 +521,9 @@ test("TC11.4 downstream failure is stored and visible to admin", async () => {
   const body = (await response.json()) as {
     deliveries: Array<{ status: string; error: string }>;
   };
-  assert.equal(body.deliveries[0].status, "failed");
+  assert.equal(body.deliveries[0].status, "pending");
   assert.equal(body.deliveries[0].error, "downstream_failed");
+  assert.equal(body.deliveries[0].attempt_count, 1);
 });
 
 test("redirect Location is re-checked with validateSafeUrl", async () => {
@@ -492,7 +555,7 @@ test("redirect Location is re-checked with validateSafeUrl", async () => {
     text: null,
     receivedAt: Date.now(),
   });
-  assert.equal(deliveries[0].status, "failed");
+  assert.equal(deliveries[0].status, "pending");
   assert.equal(deliveries[0].error, "blocked_destination");
 });
 
@@ -522,7 +585,7 @@ test("DNS re-check blocks a hostname that resolves to RFC1918", async () => {
     receivedAt: Date.now(),
   });
   assert.equal(fetched, false);
-  assert.equal(deliveries[0].status, "failed");
+  assert.equal(deliveries[0].status, "pending");
   assert.equal(deliveries[0].error, "blocked_destination");
   assert.match(String(deliveries[0].hint), /10\.1\.2\.3|DNS|resolved/i);
 });
