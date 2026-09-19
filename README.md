@@ -57,7 +57,7 @@ See Issues under milestones `P0-MVP` … `P3-dev-api`. Longer write-ups: [produc
 
 ## Status
 
-P0 inbox on the Worker: list / read / delete against D1, inbound attachments in R2, plus compose/send behind the owner session. Search (LIKE on from / subject / body), unread toggle with a nav count, and star/flag are in. System folders (inbox / sent / drafts / trash / spam) use the existing `messages.folder` column; drafts save and resume on `/compose`. Outbound is pluggable (`stub` / `resend` / `http`). Reply / reply-all / forward prefill compose and send through the same adapters (In-Reply-To / References on reply). The inbox list groups related mail into basic threads (count on the row; open expands in time order). Mailbox-scoped REST tokens live under `/api/v1` (hash at rest, `Authorization: Bearer pg_…`). Public signup is **off** unless Turnstile is configured. Small-team members (`users` + `user_mailboxes`) have address / storage / daily-send quotas; `/admin` is a forest-token 值守台 (ADMIN_TOKEN or admin role). Inbound webhooks POST a signed JSON payload; optional forward goes to a chat-bot URL or an external mailbox. Delivery failures stay on `/settings` and `/admin` (never swallowed). Outbound send attachments are a later follow-up. Light-editorial brand art (paper + forest green) lives in [`docs/assets/`](docs/assets/).
+P0 inbox on the Worker: list / read / delete against D1, inbound attachments in R2, plus compose/send behind the owner session. Search (LIKE on from / subject / body), unread toggle with a nav count, and star/flag are in. System folders (inbox / sent / drafts / trash / spam) use the existing `messages.folder` column; drafts save and resume on `/compose`. Outbound is pluggable (`stub` / `resend` / `http`). Reply / reply-all / forward prefill compose and send through the same adapters (In-Reply-To / References on reply). The inbox list groups related mail into basic threads (count on the row; open expands in time order). Mailbox-scoped REST tokens live under `/api/v1` (hash at rest, `Authorization: Bearer pg_…`). Public signup is **off** unless Turnstile is configured. Small-team members (`users` + `user_mailboxes`) have address / storage / daily-send quotas; `/admin` is a forest-token 值守台 (ADMIN_TOKEN or admin role) with a light overview (users / today's mail / attachment MB) and site title / logo / accent (`--pg-color-brand` only). The UI follows `Accept-Language` (en / zh) and can be forced from Settings. Inbound webhooks POST a signed JSON payload; optional forward goes to a chat-bot URL or an external mailbox. Delivery failures stay on `/settings` and `/admin` (never swallowed). Outbound send attachments are a later follow-up. Light-editorial brand art (paper + forest green) lives in [`docs/assets/`](docs/assets/).
 
 ## Local development
 
@@ -397,6 +397,10 @@ curl -sS -H 'Authorization: Bearer change-me-local-admin-token' \
   http://127.0.0.1:8787/admin/mailboxes
 curl -sS -H 'Authorization: Bearer change-me-local-admin-token' \
   http://127.0.0.1:8787/admin/messages
+curl -sS -H 'Authorization: Bearer change-me-local-admin-token' \
+  http://127.0.0.1:8787/admin/stats
+curl -sS -H 'Authorization: Bearer change-me-local-admin-token' \
+  http://127.0.0.1:8787/admin/branding
 ```
 
 Expect `"role": "admin"` on ping. A missing bearer/cookie returns **401**. A mailbox/owner session on `/admin/users` returns **403**. Admin bearer is not a cookie, so browser CSRF does not apply the same way; cookie admin writes still check Origin. A leaked `ADMIN_TOKEN` means rotate now.
@@ -552,7 +556,11 @@ Then, in the Cloudflare dashboard, enable Email Routing for your domain and add 
 | `src/rate-limit.ts` | In-memory limiter for token API + signup |
 | `src/users.ts` | Members, token hash, mailbox bindings |
 | `src/quotas.ts` | Address / storage / daily-send checks (`0` = unlimited) |
-| `src/admin.ts` | `/admin` 值守台 + JSON users / mailboxes / audit / inbound deliveries |
+| `src/admin.ts` | `/admin` 值守台 + JSON users / mailboxes / audit / inbound deliveries / stats / branding |
+| `src/analytics.ts` | Light overview counts (users, today's mail, attachment MB) |
+| `src/i18n.ts` | en / zh copy; `Accept-Language` + settings cookie |
+| `src/branding.ts` | Site title / logo URL / accent; `validateSafeUrl` on logo save and fetch |
+| `src/view.ts` | Shared shell (locale + branding) for HTML |
 | `src/health.ts` | `GET /healthz` |
 | `src/inbound.ts` | Email Routing stub persist + attachment limits |
 | `src/attachment-limits.ts` | Size / count caps and human-readable over-limit errors |

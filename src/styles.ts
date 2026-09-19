@@ -126,10 +126,16 @@ textarea:focus-visible {
   text-decoration: none;
 }
 
-.brand-mark {
+.brand-mark,
+.brand-logo {
   width: 22px;
   height: 22px;
   flex: 0 0 auto;
+}
+
+.brand-logo {
+  object-fit: contain;
+  border-radius: 4px;
 }
 
 .nav-list {
@@ -773,6 +779,41 @@ textarea:focus-visible {
 
 .page-inner-wide {
   max-width: 960px;
+}
+
+.admin-subnav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--pg-space-2);
+  margin: 0 0 var(--pg-space-4);
+}
+
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: var(--pg-space-3);
+  margin: 0 0 var(--pg-space-5);
+}
+
+.stat-card {
+  background: var(--pg-color-surface);
+  border: 1px solid var(--pg-color-border);
+  border-radius: var(--pg-radius-md);
+  box-shadow: var(--pg-shadow-sm);
+  padding: var(--pg-space-4);
+}
+
+.stat-card .label {
+  display: block;
+  font-size: var(--pg-text-xs);
+  color: var(--pg-color-text-secondary);
+  margin-bottom: var(--pg-space-1);
+}
+
+.stat-card .value {
+  font-size: var(--pg-text-xl);
+  font-weight: 650;
+  color: var(--pg-color-brand);
 }
 
 .grove-panel {
