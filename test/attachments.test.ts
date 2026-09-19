@@ -169,7 +169,8 @@ test("persistInboundAttachments rolls back earlier writes when a later R2 put fa
   assert.equal(db.attachments.length, 0);
   assert.equal(r2.objects.size, 0);
   assert.equal(r2.putCalls, 2);
-  assert.equal(r2.deleteCalls, 1);
+  // Stored object plus the pending key from the failed put (delete is best-effort).
+  assert.equal(r2.deleteCalls, 2);
 });
 
 test("inbound R2 persist failure rejects and does not leave a body without files", async () => {
