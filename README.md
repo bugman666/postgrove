@@ -124,7 +124,7 @@ Inbound MIME parts with `Content-Disposition: attachment` (or a filename / non-t
 | `ATTACHMENT_MAX_BYTES` | wrangler `vars` / `.dev.vars` | `10485760` (10 MiB) | Max size of one inbound attachment |
 | `ATTACHMENT_MAX_COUNT` | wrangler `vars` / `.dev.vars` | `10` | Max attachments stored per inbound message |
 
-Over-limit inbound mail is **rejected** (`message.setReject`) with a human-readable reason that includes the cap, for example: 附件太大（上限 10 MB）… Remove large files or compress and try again. The message is not stored. Missing R2 binding rejects only when the message actually has attachments.
+Over-limit inbound mail is **rejected** (`message.setReject`) with a human-readable reason that includes the cap, for example: 附件太大（上限 10 MB）… Remove large files or compress and try again. The message is not stored. Missing R2 binding rejects only when the message actually has attachments. If R2 put or the `attachments` row insert fails after the D1 message row is written, inbound also **rejects** and deletes that row (plus any partial R2 / attachment writes) so the inbox never shows a body with missing files and a sender retry is not treated as a duplicate `rfc_message_id`.
 
 Unauthenticated download is **401** (`unauthorized`, same hint as other owner routes). Another mailbox's session is **403**. There are no public unauthenticated attachment URLs. Virus scanning is out of scope. Compose/send attachments are not in this change.
 

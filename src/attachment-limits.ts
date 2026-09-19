@@ -89,6 +89,11 @@ export function missingR2Hint(): string {
   return "ATTACHMENTS R2 bucket is not bound. Add r2_buckets in wrangler.jsonc (binding ATTACHMENTS) and retry.";
 }
 
+/** Reason for inbound setReject when R2 put or attachments-row insert fails after parse. */
+export function attachmentStoreFailedHint(): string {
+  return "附件未能写入对象存储。这封信未入箱，请稍后重试。 Attachment storage failed. The message was rejected so the sender can retry.";
+}
+
 export function formatBytes(size: number): string {
   if (size < 1024) {
     return `${size} B`;
