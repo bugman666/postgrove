@@ -182,6 +182,51 @@ textarea:focus-visible {
   color: var(--pg-color-text-tertiary);
 }
 
+.nav-tools {
+  margin-top: var(--pg-space-4);
+  padding-top: var(--pg-space-3);
+  border-top: 1px solid var(--pg-color-border);
+}
+
+.folder-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--pg-space-1);
+  margin: 0 0 var(--pg-space-3);
+}
+
+.folder-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  padding: 0 var(--pg-space-2);
+  border: 1px solid var(--pg-color-border);
+  border-radius: 999px;
+  background: var(--pg-color-bg);
+  color: var(--pg-color-text-secondary);
+  font-size: var(--pg-text-xs);
+  text-decoration: none;
+}
+
+.folder-chip:hover {
+  color: var(--pg-color-brand);
+  border-color: var(--pg-color-brand);
+  text-decoration: none;
+}
+
+.folder-chip.active {
+  background: var(--pg-color-surface-muted);
+  color: var(--pg-color-brand);
+  border-color: var(--pg-color-brand);
+  font-weight: 600;
+}
+
+.compose-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--pg-space-2);
+}
+
 .mailbox-chip {
   margin-top: var(--pg-space-6);
   padding: var(--pg-space-3);
@@ -687,6 +732,12 @@ textarea:focus-visible {
 
 .logout-form {
   align-items: flex-start;
+}
+
+@media (min-width: 960px) {
+  .folder-strip {
+    display: none;
+  }
 }
 
 @media (max-width: 959px) {

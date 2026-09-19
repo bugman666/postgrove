@@ -5,6 +5,15 @@ import {
   type AttachmentRecord,
 } from "./attachments";
 import { requireOwner, type OwnerPrincipal } from "./auth";
+import {
+  FOLDER_EMPTY,
+  FOLDER_LABELS,
+  SYSTEM_FOLDERS,
+  folderNavLinks,
+  parseDraftFields,
+  parseFolder,
+  type SystemFolder,
+} from "./folders";
 import { html, redirect } from "./http";
 import { EMPTY_ART, GROVE_MARK, escapeHtml, formatReceived } from "./html";
 import { describeOutbound } from "./outbound";
@@ -20,20 +29,25 @@ import {
   countUnreadInbox,
   getInboxMessage,
   getMailbox,
+  getMailboxMessage,
   getOutboundAttempt,
+  insertDraft,
+  listFolderMessages,
   listInboxMessages,
   listOutboundAttempts,
   markRead,
+  moveMessage,
   setRead,
   setStarred,
   trashMessage,
+  updateDraft,
   type MailboxRecord,
   type MessageRecord,
   type OutboundAttemptRecord,
 } from "./store";
 import { parseInboxFilter, parseSearchQuery, type InboxFilter } from "./triage";
 
-type NavId = "inbox" | "unread" | "compose" | "addresses" | "settings";
+type NavId = SystemFolder | "unread" | "compose" | "addresses" | "settings";
 
 interface ComposeForm {
   to: string;
@@ -42,6 +56,7 @@ interface ComposeForm {
   body: string;
   inReplyTo: string;
   references: string;
+  draftId: string;
 }
 
 export async function handleUi(
@@ -99,6 +114,22 @@ export async function handleUi(
     ], true, unreadCount));
   }
 
+  const moveMatch = path.match(/^\/box\/([^/]+)\/m\/([^/]+)\/move$/);
+  if (moveMatch) {
+    if (method !== "POST") {
+      return pageMethodNotAllowed();
+    }
+    const mailbox = await allowedMailbox(env, owner, decodeURIComponent(moveMatch[1]));
+    if (!mailbox) {
+      return forbiddenOrMissing(ownMailbox, unreadCount);
+    }
+    const messageId = decodeURIComponent(moveMatch[2]);
+    const data = await request.formData();
+    const target = parseFolder(stringField(data.get("folder")));
+    await moveMessage(env, mailbox.id, messageId, target);
+    return redirect(`${boxPath(mailbox.id, target)}?moved=1`);
+  }
+
   const deleteMatch = path.match(/^\/box\/([^/]+)\/m\/([^/]+)\/delete$/);
   if (deleteMatch) {
     if (method !== "POST") {
@@ -110,7 +141,7 @@ export async function handleUi(
     }
     const messageId = decodeURIComponent(deleteMatch[2]);
     await trashMessage(env, mailbox.id, messageId);
-    return redirect(`${boxPath(mailbox.id)}${inboxQuery(url, { deleted: "1" })}`);
+    return redirect(`${boxPath(mailbox.id, "trash")}?deleted=1`);
   }
 
   const starMatch = path.match(/^\/box\/([^/]+)\/m\/([^/]+)\/star$/);
@@ -158,25 +189,41 @@ export async function handleUi(
       return forbiddenOrMissing(ownMailbox, unreadCount);
     }
     const messageId = decodeURIComponent(readMatch[2]);
-    const existing = await getInboxMessage(env, mailbox.id, messageId);
+    const existing = await getMailboxMessage(env, mailbox.id, messageId);
     if (!existing) {
       return html(renderNotFound(mailbox, unreadCount), 404);
     }
-    if (existing.is_read !== 1) {
+    if (existing.folder === "draft") {
+      return redirect(composeHref(mailbox, "new", undefined, existing.id));
+    }
+    if (existing.folder === "inbox" && existing.is_read !== 1) {
       await markRead(env, mailbox.id, existing.id);
     }
-    const message = (await getInboxMessage(env, mailbox.id, existing.id)) ?? existing;
+    const message =
+      existing.folder === "inbox"
+        ? ((await getInboxMessage(env, mailbox.id, existing.id)) ?? existing)
+        : existing;
     unreadCount = await countUnreadInbox(env, mailbox.id);
+    const folder = parseFolder(existing.folder);
     const view = readInboxView(url);
-    const messages = await listInboxMessages(env, mailbox.id, view);
+    const messages =
+      folder === "inbox"
+        ? await listInboxMessages(env, mailbox.id, view)
+        : await listFolderMessages(env, mailbox.id, folder);
     const attachments = await listMessageAttachments(env, mailbox.id, message.id);
     if (url.searchParams.get("reply") === "1") {
       return redirect(composeHref(mailbox, "reply", message.id));
     }
-    return html(renderInboxPage(mailbox, messages, message, {
+    if (folder === "inbox") {
+      return html(renderInboxPage(mailbox, messages, message, {
+        attachments,
+        unreadCount,
+        ...view,
+      }));
+    }
+    return html(renderFolderPage(mailbox, folder, messages, message, {
       attachments,
       unreadCount,
-      ...view,
     }));
   }
 
@@ -189,14 +236,31 @@ export async function handleUi(
     if (!mailbox) {
       return forbiddenOrMissing(ownMailbox, unreadCount);
     }
+    const folder = parseFolder(url.searchParams.get("folder"));
     const view = readInboxView(url);
-    const messages = await listInboxMessages(env, mailbox.id, view);
+    if (folder === "inbox") {
+      const messages = await listInboxMessages(env, mailbox.id, view);
+      return html(
+        renderInboxPage(mailbox, messages, null, {
+          deleted: url.searchParams.get("deleted") === "1",
+          markedUnread: url.searchParams.get("unread") === "1",
+          unreadCount,
+          ...view,
+        }),
+      );
+    }
+    const messages = await listFolderMessages(env, mailbox.id, folder);
+    const sentId = url.searchParams.get("sent");
+    const selectedSent =
+      folder === "sent" && sentId
+        ? messages.find((row) => row.id === sentId) ?? null
+        : null;
     return html(
-      renderInboxPage(mailbox, messages, null, {
+      renderFolderPage(mailbox, folder, messages, selectedSent, {
         deleted: url.searchParams.get("deleted") === "1",
-        markedUnread: url.searchParams.get("unread") === "1",
+        moved: url.searchParams.get("moved") === "1",
+        justSent: Boolean(sentId),
         unreadCount,
-        ...view,
       }),
     );
   }
@@ -297,7 +361,11 @@ async function handleComposeSubmit(
             ? record.inReplyTo
             : "",
       references: typeof record.references === "string" ? record.references : "",
+      draftId: typeof record.draft_id === "string" ? record.draft_id : typeof record.draftId === "string" ? record.draftId : "",
     };
+    if (record.intent === "save" || record.save === true) {
+      return saveComposeDraft(env, url, ownMailbox, form, unreadCount);
+    }
   } else {
     const data = await request.formData();
     form = {
@@ -307,7 +375,11 @@ async function handleComposeSubmit(
       body: stringField(data.get("body")),
       inReplyTo: stringField(data.get("in_reply_to")),
       references: stringField(data.get("references")),
+      draftId: stringField(data.get("draft_id")),
     };
+    if (stringField(data.get("intent")) === "save") {
+      return saveComposeDraft(env, url, ownMailbox, form, unreadCount);
+    }
   }
 
   const parsed = parseSendFields({
@@ -330,9 +402,64 @@ async function handleComposeSubmit(
     );
   }
 
-  const outcome = await sendOutbound(env, ownMailbox, parsed.input);
+  const outcome = await sendOutbound(env, ownMailbox, parsed.input, {
+    draftId: form.draftId || null,
+  });
+  if (outcome.sent) {
+    const next = new URL(boxPath(ownMailbox.id, "sent"), url.origin);
+    next.searchParams.set("sent", outcome.sent.id);
+    return redirect(`${next.pathname}${next.search}`);
+  }
   const next = new URL(withMailbox("/compose", ownMailbox), url.origin);
   next.searchParams.set("attempt", outcome.attempt.id);
+  if (form.draftId) {
+    next.searchParams.set("draft", form.draftId);
+  }
+  return redirect(`${next.pathname}${next.search}`);
+}
+
+async function saveComposeDraft(
+  env: Env,
+  url: URL,
+  mailbox: MailboxRecord,
+  form: ComposeForm,
+  unreadCount: number,
+): Promise<Response> {
+  const parsed = parseDraftFields({
+    to: form.to,
+    cc: form.cc,
+    subject: form.subject,
+    text: form.body,
+    in_reply_to: form.inReplyTo,
+    references: form.references,
+  });
+  if (!parsed.ok) {
+    return html(
+      renderComposePage(env, mailbox, {
+        form,
+        formError: parsed.hint,
+        attempts: await listOutboundAttempts(env, mailbox.id),
+        unreadCount,
+      }),
+      400,
+    );
+  }
+  const saved = form.draftId
+    ? await updateDraft(env, mailbox, form.draftId, parsed.fields)
+    : await insertDraft(env, mailbox, parsed.fields);
+  if (!saved) {
+    return html(
+      renderComposePage(env, mailbox, {
+        form,
+        formError: "找不到这封草稿。回到草稿箱再试一次。",
+        attempts: await listOutboundAttempts(env, mailbox.id),
+        unreadCount,
+      }),
+      404,
+    );
+  }
+  const next = new URL(composeHref(mailbox, "new", undefined, saved.id), url.origin);
+  next.searchParams.set("saved", "1");
   return redirect(`${next.pathname}${next.search}`);
 }
 
@@ -348,12 +475,22 @@ async function renderCompose(
     mailbox && attemptId ? await getOutboundAttempt(env, mailbox.id, attemptId) : null;
   const mode = parseComposeMode(url.searchParams.get("mode"));
   const messageId = url.searchParams.get("message");
+  const draftId = url.searchParams.get("draft");
   let form = emptyComposeForm();
   let formError: string | undefined;
   let prefill: ComposePrefill | null = null;
+  let savedDraft = false;
 
-  if (mailbox && messageId && mode !== "new") {
-    const source = await getInboxMessage(env, mailbox.id, messageId);
+  if (mailbox && draftId) {
+    const draft = await getMailboxMessage(env, mailbox.id, draftId);
+    if (!draft || draft.folder !== "draft") {
+      formError = "找不到这封草稿。回到草稿箱再试一次。";
+    } else {
+      form = formFromDraft(draft);
+      savedDraft = url.searchParams.get("saved") === "1";
+    }
+  } else if (mailbox && messageId && mode !== "new") {
+    const source = await getMailboxMessage(env, mailbox.id, messageId);
     if (!source) {
       formError = "找不到要回复或转发的原信。回到收件箱再试一次。";
     } else {
@@ -370,6 +507,7 @@ async function renderCompose(
       attempts,
       mode: prefill?.mode ?? (highlighted ? "new" : mode),
       unreadCount,
+      savedDraft,
     }),
   );
 }
@@ -379,7 +517,7 @@ function stringField(value: unknown): string {
 }
 
 function emptyComposeForm(): ComposeForm {
-  return { to: "", cc: "", subject: "", body: "", inReplyTo: "", references: "" };
+  return { to: "", cc: "", subject: "", body: "", inReplyTo: "", references: "", draftId: "" };
 }
 
 function formFromPrefill(prefill: ComposePrefill): ComposeForm {
@@ -390,6 +528,19 @@ function formFromPrefill(prefill: ComposePrefill): ComposeForm {
     body: prefill.body,
     inReplyTo: prefill.inReplyTo,
     references: prefill.references,
+    draftId: "",
+  };
+}
+
+function formFromDraft(row: MessageRecord): ComposeForm {
+  return {
+    to: row.envelope_to,
+    cc: row.header_cc ?? "",
+    subject: row.subject ?? "",
+    body: row.body_text ?? "",
+    inReplyTo: row.in_reply_to ?? "",
+    references: row.references_header ?? "",
+    draftId: row.id,
   };
 }
 
@@ -397,16 +548,26 @@ function pageMethodNotAllowed(): Response {
   return html(renderNotFound(), 405);
 }
 
-function boxPath(mailboxId: string): string {
-  return `/box/${encodeURIComponent(mailboxId)}`;
+function boxPath(mailboxId: string, folder: SystemFolder = "inbox"): string {
+  const base = `/box/${encodeURIComponent(mailboxId)}`;
+  return folder === "inbox" ? base : `${base}?folder=${encodeURIComponent(folder)}`;
 }
 
-function messagePath(mailboxId: string, messageId: string): string {
-  return `${boxPath(mailboxId)}/m/${encodeURIComponent(messageId)}`;
+function messagePath(
+  mailboxId: string,
+  messageId: string,
+  folder: SystemFolder = "inbox",
+): string {
+  const path = `/box/${encodeURIComponent(mailboxId)}/m/${encodeURIComponent(messageId)}`;
+  return folder === "inbox" ? path : `${path}?folder=${encodeURIComponent(folder)}`;
 }
 
 function inboxHref(mailbox: MailboxRecord | null): string {
   return mailbox ? boxPath(mailbox.id) : "/";
+}
+
+function folderHref(mailbox: MailboxRecord | null, folder: SystemFolder): string {
+  return mailbox ? boxPath(mailbox.id, folder) : "/";
 }
 
 function withMailbox(path: string, mailbox: MailboxRecord | null): string {
@@ -420,6 +581,7 @@ function composeHref(
   mailbox: MailboxRecord | null,
   mode: ComposeMode = "new",
   messageId?: string,
+  draftId?: string,
 ): string {
   const params = new URLSearchParams();
   if (mailbox) {
@@ -430,6 +592,9 @@ function composeHref(
   }
   if (messageId) {
     params.set("message", messageId);
+  }
+  if (draftId) {
+    params.set("draft", draftId);
   }
   const query = params.toString();
   return query ? `/compose?${query}` : "/compose";
@@ -546,6 +711,7 @@ function renderInboxPage(
     body: `<section class="list">
       <div class="list-head">
         <h1>${escapeHtml(heading)}</h1>
+        ${folderStrip(mailbox, "inbox")}
         <form class="search-form" method="get" action="${escapeHtml(boxPath(mailbox.id))}">
           <input class="search" type="search" name="q" value="${escapeHtml(q)}" placeholder="搜索发件人、主题或正文" maxlength="200">
           ${filter !== "all" ? `<input type="hidden" name="filter" value="${escapeHtml(filter)}">` : ""}
@@ -556,6 +722,102 @@ function renderInboxPage(
     </section>
     <main class="read">${reading}</main>`,
   });
+}
+
+function renderFolderPage(
+  mailbox: MailboxRecord,
+  folder: SystemFolder,
+  messages: MessageRecord[],
+  selected: MessageRecord | null,
+  flags: {
+    deleted?: boolean;
+    moved?: boolean;
+    justSent?: boolean;
+    attachments?: AttachmentRecord[];
+    unreadCount: number;
+  },
+): string {
+  const label = FOLDER_LABELS[folder];
+  const list = messages.length === 0
+    ? emptyBlock(FOLDER_EMPTY[folder])
+    : `<ul class="msg-list">${messages.map((row) => folderMessageRow(mailbox, folder, row, selected?.id)).join("")}</ul>`;
+
+  let reading: string;
+  if (selected) {
+    const sentBanner = flags.justSent
+      ? `<p class="banner success">发送成功。这封信现在在已发送。</p>`
+      : "";
+    reading = `${sentBanner}${renderReading(mailbox, selected, flags.attachments ?? [], "", "all", folder)}`;
+  } else {
+    const banners: string[] = [];
+    if (flags.deleted) {
+      banners.push(`<p class="banner">已移入垃圾箱。</p>`);
+    }
+    if (flags.moved) {
+      banners.push(`<p class="banner">已移动到${escapeHtml(label)}。</p>`);
+    }
+    if (flags.justSent) {
+      banners.push(`<p class="banner success">已记下这次发送，可在已发送里打开。</p>`);
+    }
+    reading = `${banners.join("")}<div class="read-inner"><p class="empty">从左侧选一封，或点「写信」。</p></div>`;
+  }
+
+  return layout({
+    title: selected?.subject ? `${selected.subject} · Postgrove` : `${label} · Postgrove`,
+    nav: folder,
+    mailbox,
+    mode: selected ? "read" : "list",
+    simple: false,
+    unreadCount: flags.unreadCount,
+    body: `<section class="list">
+      <div class="list-head">
+        <h1>${escapeHtml(label)}</h1>
+        ${folderStrip(mailbox, folder)}
+      </div>
+      ${list}
+    </section>
+    <main class="read">${reading}</main>`,
+  });
+}
+
+function folderStrip(mailbox: MailboxRecord, folder: SystemFolder): string {
+  return `<nav class="folder-strip" aria-label="文件夹">
+    ${folderNavLinks(folder, (id) => folderHref(mailbox, id))
+      .map(
+        (item) =>
+          `<a class="folder-chip${item.active ? " active" : ""}" href="${escapeHtml(item.href)}">${escapeHtml(item.label)}</a>`,
+      )
+      .join("")}
+  </nav>`;
+}
+
+function folderMessageRow(
+  mailbox: MailboxRecord,
+  folder: SystemFolder,
+  row: MessageRecord,
+  selectedId: string | undefined,
+): string {
+  const selected = row.id === selectedId ? " selected" : "";
+  const subject = row.subject?.trim() ? row.subject : "（无主题）";
+  const snippet = row.snippet?.trim() ?? "";
+  const peer =
+    folder === "sent" || folder === "draft"
+      ? row.envelope_to || "（未填写收件人）"
+      : row.envelope_from;
+  const href =
+    folder === "draft"
+      ? composeHref(mailbox, "new", undefined, row.id)
+      : messagePath(mailbox.id, row.id, folder);
+  return `<li>
+    <a class="msg${selected}" href="${escapeHtml(href)}">
+      <div class="msg-top">
+        <span class="from">${escapeHtml(peer)}</span>
+        <time class="time" datetime="${escapeHtml(new Date(row.received_at).toISOString())}">${escapeHtml(formatReceived(row.received_at))}</time>
+      </div>
+      <div class="subject">${escapeHtml(subject)}</div>
+      <p class="snippet">${escapeHtml(snippet)}</p>
+    </a>
+  </li>`;
 }
 
 function emptyInboxCopy(count: number, q: string, filter: InboxFilter): string {
@@ -618,6 +880,7 @@ function renderReading(
   attachments: AttachmentRecord[] = [],
   q = "",
   filter: InboxFilter = "all",
+  folder: SystemFolder = "inbox",
 ): string {
   const subject = message.subject?.trim() ? message.subject : "（无主题）";
   const body = message.body_text?.trim()
@@ -626,23 +889,52 @@ function renderReading(
   const replyHref = composeHref(mailbox, "reply", message.id);
   const replyAllHref = composeHref(mailbox, "reply-all", message.id);
   const forwardHref = composeHref(mailbox, "forward", message.id);
-  const backHref = viewHref(mailbox, q, filter);
+  const label = FOLDER_LABELS[folder];
+  const backHref = folder === "inbox" ? viewHref(mailbox, q, filter) : boxPath(mailbox.id, folder);
   const next = messageHref(mailbox, message.id, q, filter);
   const starred = message.is_starred === 1;
   const starLabel = starred ? "取消星标" : "星标";
-  const unreadAction = message.is_read === 1
-    ? `<form method="post" action="${escapeHtml(`${messagePath(mailbox.id, message.id)}/read`)}">
+  const actions: string[] = [];
+
+  if (folder === "inbox" || folder === "spam") {
+    actions.push(`<a class="btn btn-primary" href="${escapeHtml(replyHref)}">回复</a>`);
+    actions.push(`<a class="btn" href="${escapeHtml(replyAllHref)}">全部回复</a>`);
+    actions.push(`<a class="btn" href="${escapeHtml(forwardHref)}">转发</a>`);
+  } else if (folder === "sent") {
+    actions.push(`<a class="btn" href="${escapeHtml(forwardHref)}">转发</a>`);
+  }
+
+  if (folder === "inbox") {
+    actions.push(`<form method="post" action="${escapeHtml(`${messagePath(mailbox.id, message.id)}/star`)}">
+          <input type="hidden" name="starred" value="${starred ? "0" : "1"}">
+          <input type="hidden" name="next" value="${escapeHtml(next)}">
+          <button class="btn${starred ? " star-on" : ""}" type="submit">${starLabel}</button>
+        </form>`);
+    actions.push(
+      message.is_read === 1
+        ? `<form method="post" action="${escapeHtml(`${messagePath(mailbox.id, message.id)}/read`)}">
         <input type="hidden" name="read" value="0">
         <button class="btn" type="submit">标为未读</button>
       </form>`
-    : `<form method="post" action="${escapeHtml(`${messagePath(mailbox.id, message.id)}/read`)}">
+        : `<form method="post" action="${escapeHtml(`${messagePath(mailbox.id, message.id)}/read`)}">
         <input type="hidden" name="read" value="1">
         <input type="hidden" name="next" value="${escapeHtml(next)}">
         <button class="btn" type="submit">标为已读</button>
-      </form>`;
+      </form>`,
+    );
+    actions.push(moveForm(mailbox, message.id, "spam", "垃圾邮件"));
+  }
+  if (folder === "spam" || folder === "trash") {
+    actions.push(moveForm(mailbox, message.id, "inbox", "移回收件箱"));
+  }
+  if (folder !== "trash") {
+    actions.push(`<form method="post" action="${escapeHtml(`${messagePath(mailbox.id, message.id, folder)}/delete`)}" onsubmit="return confirm('删除后这封信会进入垃圾箱。确定删除？');">
+          <button class="btn btn-danger" type="submit">删除</button>
+        </form>`);
+  }
 
   return `<div class="read-inner">
-    <a class="back" href="${escapeHtml(backHref)}">← 收件箱</a>
+    <a class="back" href="${escapeHtml(backHref)}">← ${escapeHtml(label)}</a>
     <article class="read-card">
       <header class="read-head">
         <h1>${escapeHtml(subject)}</h1>
@@ -654,23 +946,24 @@ function renderReading(
         <div>时间 ${escapeHtml(formatReceived(message.received_at))}</div>
       </div>
       <div class="actions">
-        <a class="btn btn-primary" href="${escapeHtml(replyHref)}">回复</a>
-        <a class="btn" href="${escapeHtml(replyAllHref)}">全部回复</a>
-        <a class="btn" href="${escapeHtml(forwardHref)}">转发</a>
-        <form method="post" action="${escapeHtml(`${messagePath(mailbox.id, message.id)}/star`)}">
-          <input type="hidden" name="starred" value="${starred ? "0" : "1"}">
-          <input type="hidden" name="next" value="${escapeHtml(next)}">
-          <button class="btn${starred ? " star-on" : ""}" type="submit">${starLabel}</button>
-        </form>
-        ${unreadAction}
-        <form method="post" action="${escapeHtml(`${messagePath(mailbox.id, message.id)}/delete`)}" onsubmit="return confirm('删除后这封信会离开收件箱。确定删除？');">
-          <button class="btn btn-danger" type="submit">删除</button>
-        </form>
+        ${actions.join("")}
       </div>
       ${renderAttachmentsHtml(attachments)}
       <pre class="body">${body}</pre>
     </article>
   </div>`;
+}
+
+function moveForm(
+  mailbox: MailboxRecord,
+  messageId: string,
+  folder: SystemFolder,
+  label: string,
+): string {
+  return `<form method="post" action="${escapeHtml(`${messagePath(mailbox.id, messageId)}/move`)}">
+          <input type="hidden" name="folder" value="${escapeHtml(folder)}">
+          <button class="btn" type="submit">${escapeHtml(label)}</button>
+        </form>`;
 }
 
 function renderComposePage(
@@ -683,6 +976,7 @@ function renderComposePage(
     attempts: OutboundAttemptRecord[];
     mode?: ComposeMode;
     unreadCount: number;
+    savedDraft?: boolean;
   },
 ): string {
   const outbound = describeOutbound(env);
@@ -691,6 +985,9 @@ function renderComposePage(
   const banners: string[] = [];
   if (opts.highlighted) {
     banners.push(attemptBanner(opts.highlighted));
+  }
+  if (opts.savedDraft) {
+    banners.push(`<p class="banner success">草稿已保存。主题和正文已保留，可继续写或从草稿箱打开。</p>`);
   }
   if (opts.formError) {
     banners.push(
@@ -722,8 +1019,9 @@ function renderComposePage(
       ${threadLine}
       <input type="hidden" name="in_reply_to" value="${escapeHtml(opts.form.inReplyTo)}">
       <input type="hidden" name="references" value="${escapeHtml(opts.form.references)}">
+      <input type="hidden" name="draft_id" value="${escapeHtml(opts.form.draftId)}">
       <label>收件人
-        <input class="search compose-input" name="to" type="text" inputmode="email" autocomplete="email" placeholder="neighbor@example.test" required value="${escapeHtml(opts.form.to)}"${disabled}>
+        <input class="search compose-input" name="to" type="text" inputmode="email" autocomplete="email" placeholder="neighbor@example.test" value="${escapeHtml(opts.form.to)}"${disabled}>
       </label>
       <label>抄送
         <input class="search compose-input" name="cc" type="text" inputmode="email" autocomplete="email" placeholder="可选，多人用逗号分隔" value="${escapeHtml(opts.form.cc)}"${disabled}>
@@ -734,14 +1032,28 @@ function renderComposePage(
       <label>正文
         <textarea class="compose-body" name="body" rows="14"${disabled}>${escapeHtml(opts.form.body)}</textarea>
       </label>
-      <button class="btn btn-primary" type="submit"${disabled}>发送</button>
+      <div class="compose-actions">
+        <button class="btn btn-primary" type="submit" name="intent" value="send"${disabled}>发送</button>
+        <button class="btn" type="submit" name="intent" value="save"${disabled}>存草稿</button>
+      </div>
     </form>
     <script>
       (function () {
         var form = document.getElementById("compose-form");
         if (!form) return;
-        form.addEventListener("submit", function () {
-          var btn = form.querySelector("button[type=submit]");
+        form.addEventListener("submit", function (event) {
+          var submitter = event.submitter;
+          var intent = submitter && submitter.getAttribute("value");
+          if (intent === "save") return;
+          var to = form.querySelector("input[name=to]");
+          if (to && !String(to.value || "").match(/[^\\s@]+@[^\\s@]+\\.[^\\s@]+/)) {
+            event.preventDefault();
+            if (to.setCustomValidity) to.setCustomValidity("填写至少一个收件人地址后再发送。");
+            if (to.reportValidity) to.reportValidity();
+            if (to.setCustomValidity) to.setCustomValidity("");
+            return;
+          }
+          var btn = form.querySelector("button[name=intent][value=send]");
           if (btn) {
             btn.disabled = true;
             btn.textContent = "正在发送…";
@@ -1025,8 +1337,15 @@ function layout(opts: {
     <aside class="nav">
       <a class="brand" href="${escapeHtml(inbox)}">${GROVE_MARK}Postgrove</a>
       <ul class="nav-list">
-        <li><a class="${opts.nav === "inbox" ? "active" : ""}" href="${escapeHtml(inbox)}">收件箱${countBadge}</a></li>
+        ${folderNavLinks(opts.nav, (id) => folderHref(opts.mailbox, id))
+          .map((item) => {
+            const badge = item.id === "inbox" ? countBadge : "";
+            return `<li><a class="${item.active ? "active" : ""}" href="${escapeHtml(item.href)}">${escapeHtml(item.label)}${badge}</a></li>`;
+          })
+          .join("")}
         <li><a class="${opts.nav === "unread" ? "active" : ""}" href="${escapeHtml(unreadHref)}">未读</a></li>
+      </ul>
+      <ul class="nav-list nav-tools">
         <li><a class="${opts.nav === "compose" ? "active" : ""}" href="${escapeHtml(compose)}">写信</a></li>
         <li><a class="${opts.nav === "addresses" ? "active" : ""}" href="/addresses">地址</a></li>
         <li><a class="${opts.nav === "settings" ? "active" : ""}" href="${escapeHtml(settings)}">设置</a></li>
@@ -1036,7 +1355,7 @@ function layout(opts: {
     ${opts.body}
   </div>
   <nav class="mobile-nav" aria-label="主导航">
-    <a class="${opts.nav === "inbox" ? "active" : ""}" href="${escapeHtml(inbox)}">收件箱${countBadge}</a>
+    <a class="${(SYSTEM_FOLDERS as readonly string[]).includes(opts.nav) ? "active" : ""}" href="${escapeHtml(inbox)}">收件箱${countBadge}</a>
     <a class="${opts.nav === "unread" ? "active" : ""}" href="${escapeHtml(unreadHref)}">未读</a>
     <a class="${opts.nav === "compose" ? "active" : ""}" href="${escapeHtml(compose)}">写信</a>
     <a class="${opts.nav === "settings" ? "active" : ""}" href="${escapeHtml(settings)}">设置</a>

@@ -223,6 +223,134 @@ INSERT OR IGNORE INTO messages (
   1789816800000
 );
 
+INSERT OR IGNORE INTO messages (
+  id,
+  mailbox_id,
+  rfc_message_id,
+  envelope_from,
+  envelope_to,
+  subject,
+  snippet,
+  body_text,
+  header_to,
+  header_cc,
+  size_bytes,
+  is_read,
+  folder,
+  received_at,
+  created_at
+) VALUES (
+  '22222222-2222-4222-8222-222222222226',
+  '11111111-1111-4111-8111-111111111111',
+  NULL,
+  'inbox@example.test',
+  'neighbor@example.test',
+  '本地草稿种子',
+  '这是一封草稿，打开写信页应恢复主题与正文。',
+  '这是一封草稿，打开写信页应恢复主题与正文。
+
+可以改完再发送，发送后应出现在已发送。',
+  'neighbor@example.test',
+  NULL,
+  120,
+  1,
+  'draft',
+  1789817400000,
+  1789817400000
+);
+
+INSERT OR IGNORE INTO messages (
+  id,
+  mailbox_id,
+  rfc_message_id,
+  envelope_from,
+  envelope_to,
+  subject,
+  snippet,
+  body_text,
+  header_to,
+  size_bytes,
+  is_read,
+  folder,
+  received_at,
+  created_at
+) VALUES (
+  '22222222-2222-4222-8222-222222222227',
+  '11111111-1111-4111-8111-111111111111',
+  NULL,
+  'inbox@example.test',
+  'neighbor@example.test',
+  '已发出的本地种子',
+  '这封信在已发送。用来核对发送成功后的列表。',
+  '这封信在已发送。用来核对发送成功后的列表。',
+  'neighbor@example.test',
+  80,
+  1,
+  'sent',
+  1789818000000,
+  1789818000000
+);
+
+INSERT OR IGNORE INTO messages (
+  id,
+  mailbox_id,
+  rfc_message_id,
+  envelope_from,
+  envelope_to,
+  subject,
+  snippet,
+  body_text,
+  size_bytes,
+  is_read,
+  folder,
+  received_at,
+  created_at
+) VALUES (
+  '22222222-2222-4222-8222-222222222228',
+  '11111111-1111-4111-8111-111111111111',
+  '<seed-trash@example.test>',
+  'old@grove.test',
+  'inbox@example.test',
+  '已删除的本地种子',
+  '这封信在垃圾箱，不应出现在收件箱。',
+  '这封信在垃圾箱，不应出现在收件箱。',
+  70,
+  1,
+  'trash',
+  1789818600000,
+  1789818600000
+);
+
+INSERT OR IGNORE INTO messages (
+  id,
+  mailbox_id,
+  rfc_message_id,
+  envelope_from,
+  envelope_to,
+  subject,
+  snippet,
+  body_text,
+  size_bytes,
+  is_read,
+  folder,
+  received_at,
+  created_at
+) VALUES (
+  '22222222-2222-4222-8222-222222222229',
+  '11111111-1111-4111-8111-111111111111',
+  '<seed-spam@example.test>',
+  'promo@junk.test',
+  'inbox@example.test',
+  '本地垃圾邮件种子',
+  '这封信在垃圾邮件文件夹。',
+  '这封信在垃圾邮件文件夹。',
+  60,
+  0,
+  'spam',
+  1789819200000,
+  1789819200000
+);
+
 INSERT OR IGNORE INTO attachments (
   id,
   message_id,
