@@ -4,17 +4,21 @@ import { forbiddenJson, json, methodNotAllowed, notFoundJson } from "./http";
 import { buildComposePrefill, parseComposeMode } from "./reply";
 import { parseSendFields, sendOutbound } from "./send";
 import {
+  countUnreadInbox,
   getInboxMessage,
   getMailbox,
   getMessageById,
   listInboxMessages,
   listOutboundAttempts,
   markRead,
+  setRead,
+  setStarred,
   trashMessage,
   type MailboxRecord,
   type MessageRecord,
   type OutboundAttemptRecord,
 } from "./store";
+import { parseInboxFilter, parseSearchQuery, SEARCH_ENGINE } from "./triage";
 
 export async function handleApi(
   request: Request,
@@ -61,7 +65,19 @@ export async function handleApi(
     if (!mailbox) {
       return notFoundJson();
     }
-    return json({ ok: true, mailboxes: [publicMailbox(mailbox)] });
+    const unreadCount = await countUnreadInbox(env, mailbox.id);
+    return json({ ok: true, mailboxes: [publicMailbox(mailbox)], unread_count: unreadCount });
+  }
+
+  if (path === "/api/search") {
+    if (method !== "GET") {
+      return methodNotAllowed("GET");
+    }
+    const mailbox = await getMailbox(env, owner.mailboxId);
+    if (!mailbox) {
+      return notFoundJson();
+    }
+    return searchMessages(env, mailbox, url);
   }
 
   const mailboxMessages = path.match(/^\/api\/mailboxes\/([^/]+)\/messages$/);
@@ -76,13 +92,23 @@ export async function handleApi(
     if (!sameMailbox(owner, mailbox)) {
       return forbiddenJson();
     }
-    const messages = await listInboxMessages(env, mailbox.id);
-    return json({
-      ok: true,
-      mailbox: publicMailbox(mailbox),
-      folder: "inbox",
-      messages: messages.map(publicMessageListItem),
-    });
+    return searchMessages(env, mailbox, url);
+  }
+
+  const starMessage = path.match(/^\/api\/messages\/([^/]+)\/star$/);
+  if (starMessage) {
+    if (method !== "POST") {
+      return methodNotAllowed("POST");
+    }
+    return setMessageStar(request, env, owner, decodeURIComponent(starMessage[1]));
+  }
+
+  const readFlag = path.match(/^\/api\/messages\/([^/]+)\/read$/);
+  if (readFlag) {
+    if (method !== "POST") {
+      return methodNotAllowed("POST");
+    }
+    return setMessageRead(request, env, owner, decodeURIComponent(readFlag[1]));
   }
 
   const composeMatch = path.match(/^\/api\/messages\/([^/]+)\/compose$/);
@@ -106,6 +132,23 @@ export async function handleApi(
   }
 
   return notFoundJson();
+}
+
+async function searchMessages(env: Env, mailbox: MailboxRecord, url: URL): Promise<Response> {
+  const q = parseSearchQuery(url.searchParams.get("q"));
+  const filter = parseInboxFilter(url.searchParams.get("filter"));
+  const messages = await listInboxMessages(env, mailbox.id, { q, filter });
+  const unreadCount = await countUnreadInbox(env, mailbox.id);
+  return json({
+    ok: true,
+    mailbox: publicMailbox(mailbox),
+    folder: "inbox",
+    q,
+    filter,
+    engine: SEARCH_ENGINE,
+    unread_count: unreadCount,
+    messages: messages.map(publicMessageListItem),
+  });
 }
 
 async function sendMessage(
@@ -244,6 +287,121 @@ async function composePrefill(
   });
 }
 
+async function setMessageStar(
+  request: Request,
+  env: Env,
+  owner: OwnerPrincipal,
+  messageId: string,
+): Promise<Response> {
+  const existing = await getMessageById(env, messageId);
+  if (!existing) {
+    return notFoundJson();
+  }
+  if (existing.mailbox_id !== owner.mailboxId) {
+    return forbiddenJson();
+  }
+
+  const parsed = await readBooleanField(request, "starred");
+  if (!parsed.ok) {
+    return parsed.response;
+  }
+
+  const updated = await setStarred(env, existing.mailbox_id, existing.id, parsed.value);
+  if (!updated) {
+    return notFoundJson();
+  }
+  const message = await getInboxMessage(env, existing.mailbox_id, existing.id);
+  if (!message) {
+    return notFoundJson();
+  }
+  return json({ ok: true, message: publicMessageDetail(message) });
+}
+
+async function setMessageRead(
+  request: Request,
+  env: Env,
+  owner: OwnerPrincipal,
+  messageId: string,
+): Promise<Response> {
+  const existing = await getMessageById(env, messageId);
+  if (!existing) {
+    return notFoundJson();
+  }
+  if (existing.mailbox_id !== owner.mailboxId) {
+    return forbiddenJson();
+  }
+
+  const parsed = await readBooleanField(request, "read");
+  if (!parsed.ok) {
+    return parsed.response;
+  }
+
+  const updated = await setRead(env, existing.mailbox_id, existing.id, parsed.value);
+  if (!updated) {
+    return notFoundJson();
+  }
+  const message = await getInboxMessage(env, existing.mailbox_id, existing.id);
+  if (!message) {
+    return notFoundJson();
+  }
+  const unreadCount = await countUnreadInbox(env, existing.mailbox_id);
+  return json({
+    ok: true,
+    message: publicMessageDetail(message),
+    unread_count: unreadCount,
+  });
+}
+
+async function readBooleanField(
+  request: Request,
+  field: "starred" | "read",
+): Promise<{ ok: true; value: boolean } | { ok: false; response: Response }> {
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return {
+      ok: false,
+      response: json(
+        {
+          ok: false,
+          error: "invalid_request",
+          hint: `Send JSON { "${field}": true|false }.`,
+        },
+        400,
+      ),
+    };
+  }
+  if (!body || typeof body !== "object") {
+    return {
+      ok: false,
+      response: json(
+        {
+          ok: false,
+          error: "invalid_request",
+          hint: `Send JSON { "${field}": true|false }.`,
+        },
+        400,
+      ),
+    };
+  }
+  const value = (body as Record<string, unknown>)[field];
+  if (typeof value !== "boolean") {
+    return {
+      ok: false,
+      response: json(
+        {
+          ok: false,
+          error: "invalid_request",
+          hint: `Send JSON { "${field}": true|false }.`,
+        },
+        400,
+      ),
+    };
+  }
+  return { ok: true, value };
+}
+
 async function deleteMessage(
   env: Env,
   owner: OwnerPrincipal,
@@ -285,6 +443,7 @@ function publicMessageListItem(row: MessageRecord) {
     subject: row.subject,
     snippet: row.snippet,
     is_read: row.is_read === 1,
+    is_starred: row.is_starred === 1,
     received_at: row.received_at,
   };
 }
