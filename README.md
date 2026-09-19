@@ -510,7 +510,7 @@ Then, in the Cloudflare dashboard, enable Email Routing for your domain and add 
 | `migrations/0006_message_star.sql` | `messages.is_starred` + unread / star indexes |
 | `migrations/0007_mailbox_folders.sql` | Folder / draft indexes (P1) |
 | `migrations/0008_api_tokens.sql` | Mailbox-scoped API tokens (hash at rest) |
-| `migrations/0008_users_rbac_quotas.sql` | `users`, `user_mailboxes`, `send_usage` |
+| `migrations/0009_users_rbac_quotas.sql` | `users`, `user_mailboxes`, `send_usage` |
 | `scripts/seed-local.sql` | Local sample mailboxes + messages (not for remote) |
 | `scripts/seed-grove-note.txt` | Local sample attachment bytes |
 | `wrangler.jsonc` | Worker + D1 + R2 bindings (placeholders) |
