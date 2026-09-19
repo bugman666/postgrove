@@ -349,8 +349,9 @@ Expect `201` and `token.token` (`pg_…`). Store it; `GET /api/tokens` / `GET /a
 export PG_TOKEN='pg_…'   # paste the minted secret
 
 curl -sS -H "Authorization: Bearer $PG_TOKEN" http://127.0.0.1:8787/api/v1/mailboxes
-curl -sS -H "Authorization: Bearer $PG_TOKEN" \
-  -X POST http://127.0.0.1:8787/api/v1/mailboxes \
+# token REST cannot create addresses (403). Admin creates them:
+curl -sS -H 'Authorization: Bearer change-me-local-admin-token' \
+  -X POST http://127.0.0.1:8787/admin/mailboxes \
   -H 'content-type: application/json' \
   -d '{"address":"support@example.test","display_name":"Support"}'
 curl -sS -H "Authorization: Bearer $PG_TOKEN" \
@@ -363,9 +364,9 @@ curl -sS -H "Authorization: Bearer $PG_TOKEN" \
   -d '{"to":"neighbor@example.test","subject":"hello","text":"from token REST"}'
 ```
 
-Missing or invalid bearer → **401**. Using a token on another mailbox's messages or send → **403**. `GET /api/v1` is a public catalog (no secrets). Apply `npm run db:migrate:local` so `api_tokens` exists (`0008_api_tokens.sql`).
+Missing or invalid bearer → **401**. Using a token on another mailbox's messages or send → **403**. `POST /api/v1/mailboxes` with a `pg_` token is **403** (`forbidden`: create is admin-only). `GET /api/v1` is a public catalog (no secrets). Apply `npm run db:migrate:local` so `api_tokens` exists (`0008_api_tokens.sql`).
 
-Owner session can also `POST /api/mailboxes` `{ "address" }` to create an address (still one shared `OWNER_TOKEN` to log in as it). Admin: `POST /admin/mailboxes`.
+**Create addresses** is not a token REST capability. Admin: `POST /admin/mailboxes` with `ADMIN_TOKEN`. Owner session (cookie UI/API): `POST /api/mailboxes` `{ "address" }` (still one shared `OWNER_TOKEN` to log in as the new address). Public signup is a separate Turnstile-gated path when enabled.
 
 **Public signup (Turnstile, off by default).** `POST /api/v1/public/signup` is **403** `public_signup_disabled` unless `TURNSTILE_SECRET_KEY` is set. When it is set, a Cloudflare Turnstile widget (site key `TURNSTILE_SITE_KEY`) must succeed: the Worker POSTs `secret` + `response` (+ optional `remoteip`) to `https://challenges.cloudflare.com/turnstile/v0/siteverify`. Missing or failed challenge → **403**. Success creates the mailbox and returns a one-time `pg_…` token.
 

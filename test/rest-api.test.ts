@@ -10,6 +10,7 @@ import { OWNER_SESSION_COOKIE, requireOwner, signOwnerSession } from "../src/aut
 import type { Env } from "../src/env.ts";
 import {
   DEFAULT_REST_BODY_MAX_BYTES,
+  REST_CREATE_FORBIDDEN_HINT,
   REST_CROSS_MAILBOX_HINT,
   handleOwnerTokenRoutes,
   handleRestRoutes,
@@ -299,7 +300,7 @@ test("API token hash roundtrip and pg_ prefix", async () => {
   assert.notEqual(generated.hash, generated.token);
 });
 
-test("TC12.1 valid API token lists/creates addresses, lists/reads messages, sends", async () => {
+test("TC12.1 valid API token lists the bound mailbox, lists/reads messages, sends; create is admin-only", async () => {
   const db = new MemoryD1();
   const token = await mint(db);
   const testEnv = env(db);
@@ -313,9 +314,26 @@ test("TC12.1 valid API token lists/creates addresses, lists/reads messages, send
   assert.equal(listedBody.mailboxes.length, 1);
   assert.equal(listedBody.mailboxes[0].id, MAILBOX_A.id);
 
-  const created = await rest(
+  const tokenCreate = await rest(
     bearer(token, "http://127.0.0.1:8787/api/v1/mailboxes", {
       method: "POST",
+      body: JSON.stringify({ address: "support@example.test", display_name: "Support" }),
+    }),
+    testEnv,
+  );
+  assert.ok(tokenCreate);
+  assert.equal(tokenCreate.status, 403);
+  const tokenCreateBody = (await tokenCreate.json()) as { error: string; hint: string };
+  assert.equal(tokenCreateBody.error, "forbidden");
+  assert.equal(tokenCreateBody.hint, REST_CREATE_FORBIDDEN_HINT);
+
+  const created = await rest(
+    new Request("http://127.0.0.1:8787/admin/mailboxes", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${ADMIN}`,
+        "content-type": "application/json",
+      },
       body: JSON.stringify({ address: "support@example.test", display_name: "Support" }),
     }),
     testEnv,

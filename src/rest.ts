@@ -49,6 +49,8 @@ import { turnstileConfigured, verifyTurnstile } from "./turnstile.ts";
 export const DEFAULT_REST_BODY_MAX_BYTES = 256_000;
 export const REST_CROSS_MAILBOX_HINT =
   "This API token is bound to another mailbox. Use a token minted for that address.";
+export const REST_CREATE_FORBIDDEN_HINT =
+  "Mailbox-scoped API tokens cannot create addresses. Use POST /admin/mailboxes with the admin bearer, or POST /api/mailboxes with an owner session. Public signup is POST /api/v1/public/signup when Turnstile is enabled.";
 
 type TokenPrincipal = {
   kind: "token";
@@ -140,6 +142,12 @@ async function handleV1(request: Request, env: Env, url: URL): Promise<Response>
       return listAddresses(env, principal);
     }
     if (method === "POST") {
+      if (principal.kind === "token") {
+        return json(
+          { ok: false, error: "forbidden", hint: REST_CREATE_FORBIDDEN_HINT },
+          403,
+        );
+      }
       return createAddress(request, env);
     }
     return methodNotAllowed("GET, POST");
@@ -410,7 +418,7 @@ async function handlePublicSignup(request: Request, env: Env): Promise<Response>
       {
         ok: false,
         error: "public_signup_disabled",
-        hint: "Public signup is off by default. Set TURNSTILE_SECRET_KEY (and TURNSTILE_SITE_KEY for the widget) to enable it, or create addresses with an owner session / admin / API token.",
+        hint: "Public signup is off by default. Set TURNSTILE_SECRET_KEY (and TURNSTILE_SITE_KEY for the widget) to enable it, or create addresses with POST /admin/mailboxes (admin) or POST /api/mailboxes (owner session).",
       },
       403,
     );
