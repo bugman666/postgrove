@@ -7,14 +7,25 @@
  *   Header X-Postgrove-Signature: v1=<hex>
  *   Header X-Postgrove-Event: inbound
  *
+ * webhook_secret is stored enveloped (enc:v1: AES-GCM, key from SESSION_SECRET).
+ * Mint / rotate returns plaintext once; later reads only set webhook_secret_set.
+ * Delivery opens the envelope and HMAC-signs with the plaintext. verifyWebhookSignature
+ * compares the hex MAC in constant time. Leftover plaintext rows wrap on read/save.
+ *
  * Save, fetch, and each redirect hop call validateSafeUrl from src/safe-url.ts.
+ * Hostnames are re-checked after DNS via recheckResolvedIps (shared with logo probe).
  * Default: https only. http://127.0.0.1 (and other private http) only when
  * ALLOW_PRIVATE_WEBHOOKS=1 (passed as allowPrivate). Redirects are followed
  * manually — never redirect: "follow".
  */
 
 import type { Env } from "./env.ts";
-import { isBlockedIp, validateSafeUrl, type ValidateSafeUrlResult } from "./safe-url.ts";
+import {
+  recheckResolvedIps,
+  validateSafeUrl,
+  type ResolveHost,
+  type ValidateSafeUrlResult,
+} from "./safe-url.ts";
 import { parseSendFields, sendOutbound } from "./send.ts";
 import { getMailbox, parseMailboxAddress, type MailboxRecord } from "./store.ts";
 
@@ -26,6 +37,9 @@ export const WEBHOOK_SIGNED_STRING = "${timestamp}.${raw_json_body}";
 export const WEBHOOK_MAX_SKEW_SECONDS = 5 * 60;
 export const WEBHOOK_MAX_REDIRECTS = 5;
 export const WEBHOOK_BODY_TEXT_MAX = 8000;
+/** AES-GCM envelope prefix. Legacy plaintext rows are wrapped on read/save. */
+export const WEBHOOK_SECRET_ENVELOPE_PREFIX = "enc:v1:";
+const WEBHOOK_SECRET_WRAP_INFO = "postgrove.webhook_secret.v1";
 
 const URL_MAX = 2048;
 const SECRET_MIN = 8;
@@ -106,7 +120,6 @@ export type InboundNotifyInput = {
 };
 
 type FetchImpl = typeof fetch;
-type ResolveHost = (hostname: string) => Promise<string[] | null>;
 
 let testFetch: FetchImpl | null = null;
 let testResolve: ResolveHost | null = null;
@@ -232,13 +245,18 @@ export function gateHookUrl(
 }
 
 export async function getHookConfig(env: Env, mailboxId: string): Promise<InboundHookRow | null> {
-  return env.DB.prepare(
+  const row = await env.DB.prepare(
     `SELECT mailbox_id, webhook_enabled, webhook_url, webhook_secret,
             forward_enabled, forward_url, forward_email, updated_at
      FROM inbound_hooks WHERE mailbox_id = ?1`,
   )
     .bind(mailboxId)
     .first<InboundHookRow>();
+  if (!row) {
+    return null;
+  }
+  row.webhook_secret = await upgradeStoredWebhookSecret(env, row.mailbox_id, row.webhook_secret);
+  return row;
 }
 
 export async function saveHookConfig(
@@ -313,11 +331,12 @@ export async function saveHookConfig(
     );
   }
 
-  let secret = existing?.webhook_secret ?? null;
+  let storedSecret = existing?.webhook_secret ?? null;
   let secretOnce: string | null = null;
-  if (input.rotate_secret || (webhookEnabled && !secret && input.webhook_secret === undefined)) {
-    secret = generateWebhookSecret();
-    secretOnce = secret;
+  if (input.rotate_secret || (webhookEnabled && !storedSecret && input.webhook_secret === undefined)) {
+    const minted = generateWebhookSecret();
+    storedSecret = await envelopeWebhookSecret(env, minted);
+    secretOnce = minted;
   }
   if (input.webhook_secret !== undefined) {
     const next = normalizeOptional(input.webhook_secret);
@@ -328,20 +347,24 @@ export async function saveHookConfig(
           `webhook_secret must be ${SECRET_MIN}–${SECRET_MAX} characters.`,
         );
       }
-      secret = next;
+      storedSecret = await envelopeWebhookSecret(env, next);
       secretOnce = next;
     }
   }
-  if (webhookEnabled && !secret) {
-    secret = generateWebhookSecret();
-    secretOnce = secret;
+  if (webhookEnabled && !storedSecret) {
+    const minted = generateWebhookSecret();
+    storedSecret = await envelopeWebhookSecret(env, minted);
+    secretOnce = minted;
+  }
+  if (storedSecret && !isEnvelopedWebhookSecret(storedSecret)) {
+    storedSecret = await envelopeWebhookSecret(env, storedSecret);
   }
 
   const row: InboundHookRow = {
     mailbox_id: mailboxId,
     webhook_enabled: webhookEnabled ? 1 : 0,
     webhook_url: webhookUrl,
-    webhook_secret: secret,
+    webhook_secret: storedSecret,
     forward_enabled: forwardEnabled ? 1 : 0,
     forward_url: forwardUrl,
     forward_email: forwardEmail,
@@ -555,7 +578,23 @@ async function deliverWebhook(
   input: InboundNotifyInput,
 ): Promise<InboundDeliveryRecord> {
   const rawBody = JSON.stringify(inboundWebhookPayload(input));
-  const secret = config.webhook_secret ?? "";
+  let secret = "";
+  if (config.webhook_secret) {
+    try {
+      secret = await openWebhookSecret(env, config.webhook_secret);
+    } catch {
+      return insertDelivery(env, {
+        mailbox_id: input.mailboxId,
+        message_id: input.messageId,
+        kind: "webhook",
+        target: redactTarget(config.webhook_url ?? ""),
+        status: "failed",
+        http_status: null,
+        error: "secret_unreadable",
+        hint: "Stored webhook secret could not be opened. Rotate the hook secret (SESSION_SECRET may have changed).",
+      });
+    }
+  }
   const signed = secret ? await signWebhookBody(secret, rawBody) : null;
   const headers: Record<string, string> = {
     "content-type": "application/json",
@@ -734,7 +773,7 @@ export async function safeOutboundFetch(
 ): Promise<SafeFetchResult> {
   const allowPrivate = opts.allowPrivate === true;
   const fetchImpl = opts.fetchImpl ?? testFetch ?? fetch;
-  const resolveHost = opts.resolveHost ?? testResolve ?? resolveHostDoH;
+  const resolveHost = opts.resolveHost ?? testResolve ?? undefined;
   let current = rawUrl;
   let method = (init.method ?? "POST").toUpperCase();
   let body = init.body;
@@ -746,8 +785,12 @@ export async function safeOutboundFetch(
       return { ok: false, error: gated.error, hint: gated.hint };
     }
     const url = gated.url;
-    const dns = await recheckResolvedIps(url.hostname, allowPrivate, resolveHost);
-    if (dns) {
+    const dns = await recheckResolvedIps(url.hostname, {
+      allowPrivate,
+      resolveHost,
+      fetchImpl,
+    });
+    if (!dns.ok) {
       return dns;
     }
 
@@ -809,81 +852,6 @@ export async function safeOutboundFetch(
   };
 }
 
-async function recheckResolvedIps(
-  hostname: string,
-  allowPrivate: boolean,
-  resolveHost: ResolveHost,
-): Promise<SafeFetchResult | null> {
-  if (isIpLiteral(hostname)) {
-    return null;
-  }
-  let ips: string[] | null;
-  try {
-    ips = await resolveHost(hostname);
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : "unknown";
-    console.log("inbound hooks: DNS re-check skipped", { hostname, detail });
-    return null;
-  }
-  if (ips === null) {
-    return null;
-  }
-  if (ips.length === 0) {
-    return {
-      ok: false,
-      error: "unresolved_host",
-      hint: `Host "${hostname}" did not resolve. Webhook/forward was not sent.`,
-    };
-  }
-  if (allowPrivate) {
-    return null;
-  }
-  for (const ip of ips) {
-    if (isBlockedIp(ip)) {
-      return {
-        ok: false,
-        error: "blocked_destination",
-        hint: `Host "${hostname}" resolved to blocked address ${ip}. Internal, metadata, loopback, RFC1918, link-local, and CGNAT targets are rejected after DNS.`,
-      };
-    }
-  }
-  return null;
-}
-
-async function resolveHostDoH(hostname: string): Promise<string[] | null> {
-  const fetchImpl = testFetch ?? fetch;
-  const ips = new Set<string>();
-  try {
-    for (const type of ["A", "AAAA"] as const) {
-      const url = `https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(hostname)}&type=${type}`;
-      const response = await fetchImpl(url, {
-        headers: { accept: "application/dns-json" },
-        redirect: "manual",
-      });
-      if (!response.ok) {
-        return null;
-      }
-      const body = (await response.json()) as { Answer?: Array<{ type?: number; data?: string }> };
-      for (const answer of body.Answer ?? []) {
-        if ((answer.type === 1 || answer.type === 28) && typeof answer.data === "string") {
-          ips.add(answer.data.replace(/\.$/, ""));
-        }
-      }
-    }
-    return [...ips];
-  } catch {
-    return null;
-  }
-}
-
-function isIpLiteral(host: string): boolean {
-  const value = host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host;
-  if (value.includes(":")) {
-    return true;
-  }
-  return /^(?:\d{1,3}\.){3}\d{1,3}$/.test(value);
-}
-
 function chatText(input: InboundNotifyInput): string {
   const subject = input.subject?.trim() || "（无主题）";
   const snippet = input.snippet?.trim() || "";
@@ -904,6 +872,80 @@ function redactTarget(url: string): string {
   } catch {
     return url.slice(0, 120);
   }
+}
+
+export function isEnvelopedWebhookSecret(value: string): boolean {
+  return value.startsWith(WEBHOOK_SECRET_ENVELOPE_PREFIX);
+}
+
+/** AES-GCM wrap keyed from SESSION_SECRET. Outbound HMAC still needs plaintext. */
+export async function envelopeWebhookSecret(env: Env, plaintext: string): Promise<string> {
+  const key = await webhookSecretAesKey(env);
+  const iv = new Uint8Array(12);
+  crypto.getRandomValues(iv);
+  const cipher = new Uint8Array(
+    await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, new TextEncoder().encode(plaintext)),
+  );
+  const packed = new Uint8Array(iv.length + cipher.length);
+  packed.set(iv, 0);
+  packed.set(cipher, iv.length);
+  return WEBHOOK_SECRET_ENVELOPE_PREFIX + bytesToB64url(packed);
+}
+
+/** Open an enveloped row, or return leftover plaintext (legacy, pre-0014). */
+export async function openWebhookSecret(env: Env, stored: string): Promise<string> {
+  if (!isEnvelopedWebhookSecret(stored)) {
+    return stored;
+  }
+  const packed = b64urlToBytes(stored.slice(WEBHOOK_SECRET_ENVELOPE_PREFIX.length));
+  if (packed.length < 13) {
+    throw new Error("unreadable_webhook_secret");
+  }
+  const iv = packed.slice(0, 12);
+  const cipher = packed.slice(12);
+  const key = await webhookSecretAesKey(env);
+  try {
+    const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, cipher);
+    return new TextDecoder().decode(plain);
+  } catch {
+    throw new Error("unreadable_webhook_secret");
+  }
+}
+
+async function upgradeStoredWebhookSecret(
+  env: Env,
+  mailboxId: string,
+  stored: string | null,
+): Promise<string | null> {
+  if (!stored || isEnvelopedWebhookSecret(stored)) {
+    return stored;
+  }
+  try {
+    const wrapped = await envelopeWebhookSecret(env, stored);
+    await env.DB.prepare(`UPDATE inbound_hooks SET webhook_secret = ?2 WHERE mailbox_id = ?1`)
+      .bind(mailboxId, wrapped)
+      .run();
+    return wrapped;
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "unknown";
+    console.log("inbound hooks: secret envelope upgrade skipped", { mailboxId, detail });
+    return stored;
+  }
+}
+
+async function webhookSecretAesKey(env: Env): Promise<CryptoKey> {
+  const secret = env.SESSION_SECRET?.trim() ?? "";
+  if (secret.length < 16) {
+    throw new HookInputError(
+      "misconfigured",
+      "SESSION_SECRET is required to store webhook secrets at rest (min 16 characters).",
+    );
+  }
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(`${WEBHOOK_SECRET_WRAP_INFO}:${secret}`),
+  );
+  return crypto.subtle.importKey("raw", digest, "AES-GCM", false, ["encrypt", "decrypt"]);
 }
 
 function generateWebhookSecret(): string {
@@ -1003,4 +1045,23 @@ async function hmacSha256(secret: string, data: string): Promise<Uint8Array> {
 
 function bytesToHex(bytes: Uint8Array): string {
   return [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function bytesToB64url(bytes: Uint8Array): string {
+  let bin = "";
+  for (const byte of bytes) {
+    bin += String.fromCharCode(byte);
+  }
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function b64urlToBytes(value: string): Uint8Array {
+  const padded = value.replace(/-/g, "+").replace(/_/g, "/");
+  const pad = padded.length % 4 === 0 ? "" : "=".repeat(4 - (padded.length % 4));
+  const bin = atob(padded + pad);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) {
+    out[i] = bin.charCodeAt(i);
+  }
+  return out;
 }

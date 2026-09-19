@@ -1,5 +1,5 @@
 import type { Env } from "./env.ts";
-import { validateSafeUrl } from "./safe-url.ts";
+import { recheckResolvedIps, validateSafeUrl, type ResolveHost } from "./safe-url.ts";
 
 export const DEFAULT_SITE_TITLE = "Postgrove";
 export const DEFAULT_ACCENT = "#1B4332";
@@ -30,10 +30,16 @@ export class BrandingInputError extends Error {
 
 type FetchImpl = typeof fetch;
 let testFetch: FetchImpl | null = null;
+let testResolve: ResolveHost | null = null;
 
 /** Test-only fetch override for logo probe. */
 export function setLogoFetchForTests(fn: FetchImpl | null): void {
   testFetch = fn;
+}
+
+/** Test-only DNS answers. Return [] for NXDOMAIN, null to skip IP re-check. */
+export function setLogoResolveForTests(fn: ResolveHost | null): void {
+  testResolve = fn;
 }
 
 export function defaultBranding(): SiteBranding {
@@ -142,8 +148,9 @@ export async function saveBranding(
 }
 
 /**
- * Empty is allowed (text mark). Non-empty must pass validateSafeUrl
- * and a live fetch (redirect hops re-checked).
+ * Empty is allowed (text mark). Non-empty must pass validateSafeUrl,
+ * the same DNS IP re-check as webhooks (recheckResolvedIps), and a
+ * live fetch (redirect hops re-checked).
  */
 export async function gateLogoUrl(raw: unknown): Promise<string | null> {
   if (raw === null) {
@@ -177,6 +184,13 @@ export async function probeLogoUrl(raw: string): Promise<void> {
   for (let hop = 0; hop <= LOGO_FETCH_MAX_REDIRECTS; hop++) {
     const checked = validateSafeUrl(current);
     if (!checked.ok || checked.url.protocol !== "https:") {
+      throw new BrandingInputError("invalid_logo", LOGO_FAIL_HINT);
+    }
+    const dns = await recheckResolvedIps(checked.url.hostname, {
+      resolveHost: testResolve ?? undefined,
+      fetchImpl,
+    });
+    if (!dns.ok) {
       throw new BrandingInputError("invalid_logo", LOGO_FAIL_HINT);
     }
 

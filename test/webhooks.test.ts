@@ -10,9 +10,15 @@ import {
 } from "../src/auth.ts";
 import type { Env } from "../src/env.ts";
 import {
+  WEBHOOK_SECRET_ENVELOPE_PREFIX,
+  envelopeWebhookSecret,
   gateHookUrl,
+  getHookConfig,
+  isEnvelopedWebhookSecret,
   notifyInbound,
+  openWebhookSecret,
   parseHookConfigBody,
+  publicHookConfig,
   saveHookConfig,
   setWebhookFetchForTests,
   setWebhookResolveForTests,
@@ -123,6 +129,14 @@ class MemoryStatement {
   mutate(): number {
     const sql = collapse(this.sql);
     const b = this.binds;
+    if (sql.startsWith("update inbound_hooks set webhook_secret")) {
+      const row = this.db.inbound_hooks.find((item) => item.mailbox_id === b[0]);
+      if (!row) {
+        return 0;
+      }
+      row.webhook_secret = b[1];
+      return 1;
+    }
     if (sql.startsWith("insert into inbound_hooks")) {
       const row = {
         mailbox_id: b[0],
@@ -574,4 +588,146 @@ test("owner can save a public https webhook", async () => {
 
 test("parseHookConfigBody rejects a non-object", () => {
   assert.throws(() => parseHookConfigBody(null));
+});
+
+test("webhook_secret is stored enveloped; verify still works; rotate shows once", async () => {
+  const db = new MemoryD1();
+  const e = env(db);
+  const saved = await saveHookConfig(e, INBOX.id, {
+    webhook_enabled: true,
+    webhook_url: "https://hooks.example.test/inbound",
+    webhook_secret: HOOK_SECRET,
+  });
+  const stored = String(db.inbound_hooks[0]?.webhook_secret ?? "");
+  assert.ok(isEnvelopedWebhookSecret(stored));
+  assert.ok(stored.startsWith(WEBHOOK_SECRET_ENVELOPE_PREFIX));
+  assert.notEqual(stored, HOOK_SECRET);
+  assert.equal(stored.includes(HOOK_SECRET), false);
+  assert.equal(saved.secretOnce, HOOK_SECRET);
+  assert.equal(saved.row.webhook_secret, stored);
+  assert.equal(await openWebhookSecret(e, stored), HOOK_SECRET);
+
+  const listed = publicHookConfig(saved.row);
+  assert.equal(listed.webhook_secret_set, true);
+  assert.equal("webhook_secret" in listed, false);
+
+  const get = await handleApi(
+    new Request("http://127.0.0.1:8787/api/hooks", {
+      headers: { cookie: await ownerCookie() },
+    }),
+    e,
+    new URL("http://127.0.0.1:8787/api/hooks"),
+  );
+  assert.equal(get.status, 200);
+  const getBody = (await get.json()) as { hook: { webhook_secret?: string; webhook_secret_set: boolean } };
+  assert.equal(getBody.hook.webhook_secret_set, true);
+  assert.equal(getBody.hook.webhook_secret, undefined);
+
+  let posted: { headers: Headers; body: string } | null = null;
+  setWebhookResolveForTests(async () => ["203.0.113.10"]);
+  setWebhookFetchForTests(async (input, init) => {
+    if (String(input).includes("hooks.example.test")) {
+      posted = { headers: new Headers(init?.headers), body: String(init?.body) };
+      return new Response("ok", { status: 200 });
+    }
+    return new Response("unexpected", { status: 500 });
+  });
+  await notifyInbound(e, {
+    mailboxId: INBOX.id,
+    mailboxAddress: INBOX.address,
+    messageId: "msg-enveloped",
+    from: "neighbor@example.test",
+    to: INBOX.address,
+    subject: "secret",
+    snippet: null,
+    text: null,
+    receivedAt: Date.now(),
+  });
+  assert.ok(posted);
+  const verified = await verifyWebhookSignature({
+    secret: HOOK_SECRET,
+    timestamp: posted.headers.get("x-postgrove-timestamp") ?? "",
+    rawBody: posted.body,
+    signatureHeader: posted.headers.get("x-postgrove-signature"),
+  });
+  assert.equal(verified.ok, true);
+
+  const rotated = await saveHookConfig(e, INBOX.id, { rotate_secret: true });
+  assert.ok(rotated.secretOnce);
+  assert.notEqual(rotated.secretOnce, HOOK_SECRET);
+  const rotatedStored = String(db.inbound_hooks[0]?.webhook_secret ?? "");
+  assert.ok(isEnvelopedWebhookSecret(rotatedStored));
+  assert.notEqual(rotatedStored, rotated.secretOnce);
+  assert.equal(rotatedStored.includes(rotated.secretOnce ?? ""), false);
+  assert.equal(await openWebhookSecret(e, rotatedStored), rotated.secretOnce);
+  const rotatePublic = publicHookConfig(rotated.row, rotated.secretOnce ?? undefined);
+  assert.equal(rotatePublic.webhook_secret, rotated.secretOnce);
+
+  const afterRotate = await handleApi(
+    new Request("http://127.0.0.1:8787/api/hooks", {
+      headers: { cookie: await ownerCookie() },
+    }),
+    e,
+    new URL("http://127.0.0.1:8787/api/hooks"),
+  );
+  const afterBody = (await afterRotate.json()) as { hook: { webhook_secret?: string } };
+  assert.equal(afterBody.hook.webhook_secret, undefined);
+});
+
+test("legacy plaintext webhook_secret is wrapped on read and still signs", async () => {
+  const db = new MemoryD1();
+  const e = env(db);
+  db.inbound_hooks.push({
+    mailbox_id: INBOX.id,
+    webhook_enabled: 1,
+    webhook_url: "https://hooks.example.test/legacy",
+    webhook_secret: HOOK_SECRET,
+    forward_enabled: 0,
+    forward_url: null,
+    forward_email: null,
+    updated_at: 1,
+  });
+  const row = await getHookConfig(e, INBOX.id);
+  assert.ok(row);
+  assert.ok(isEnvelopedWebhookSecret(row.webhook_secret ?? ""));
+  assert.notEqual(row.webhook_secret, HOOK_SECRET);
+  assert.equal(db.inbound_hooks[0]?.webhook_secret, row.webhook_secret);
+  assert.equal(await openWebhookSecret(e, row.webhook_secret ?? ""), HOOK_SECRET);
+
+  let posted: { headers: Headers; body: string } | null = null;
+  setWebhookResolveForTests(async () => ["203.0.113.10"]);
+  setWebhookFetchForTests(async (_input, init) => {
+    posted = { headers: new Headers(init?.headers), body: String(init?.body) };
+    return new Response("ok", { status: 200 });
+  });
+  await notifyInbound(e, {
+    mailboxId: INBOX.id,
+    mailboxAddress: INBOX.address,
+    messageId: "msg-legacy",
+    from: "neighbor@example.test",
+    to: INBOX.address,
+    subject: "legacy",
+    snippet: null,
+    text: null,
+    receivedAt: Date.now(),
+  });
+  assert.ok(posted);
+  const verified = await verifyWebhookSignature({
+    secret: HOOK_SECRET,
+    timestamp: posted.headers.get("x-postgrove-timestamp") ?? "",
+    rawBody: posted.body,
+    signatureHeader: posted.headers.get("x-postgrove-signature"),
+  });
+  assert.equal(verified.ok, true);
+});
+
+test("envelopeWebhookSecret round-trips and rejects a different SESSION_SECRET", async () => {
+  const e = env(new MemoryD1());
+  const wrapped = await envelopeWebhookSecret(e, HOOK_SECRET);
+  assert.ok(isEnvelopedWebhookSecret(wrapped));
+  assert.equal(await openWebhookSecret(e, wrapped), HOOK_SECRET);
+  await assert.rejects(
+    () => openWebhookSecret({ ...e, SESSION_SECRET: "other-session-secret-1" }, wrapped),
+    /unreadable_webhook_secret/,
+  );
 });

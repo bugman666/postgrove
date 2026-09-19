@@ -251,7 +251,7 @@ Local example uses `OUTBOUND_PROVIDER=stub`: the adapter records the attempt and
 | `OUTBOUND_PROVIDER` | `stub` · `resend` · `http`. Unset → send fails with an actionable hint |
 | `RESEND_API_KEY` | Required for `resend` |
 | `RESEND_FROM` | Optional From override (verified domain) |
-| `OUTBOUND_HTTP_URL` | Required for `http` (POST JSON `{from,to,subject,text}`; optional `cc`, `headers`, `in_reply_to`, `references`) |
+| `OUTBOUND_HTTP_URL` | Required for `http` (POST JSON `{from,to,subject,text}`; optional `cc`, `headers`, `in_reply_to`, `references`). **Operator-trusted only** — set in `.dev.vars` / `wrangler secret put`, never accept this URL from the UI. If a settings field is ever added, it must go through `validateSafeUrl`. |
 | `OUTBOUND_HTTP_TOKEN` | Optional Bearer for the HTTP hook |
 | `OUTBOUND_FROM` | Optional From override for any provider |
 
@@ -277,9 +277,11 @@ Open [http://127.0.0.1:8787/compose](http://127.0.0.1:8787/compose) while signed
 
 `src/safe-url.ts` is a default-deny helper for operator-supplied outbound URLs (inbound webhooks / forward, #11). Policy matches [open-site-health `internal/safeurl`](https://github.com/bugman666/open-site-health/tree/main/internal/safeurl): `http` / `https` only; block `localhost`, `*.localhost`, `localhost.localdomain`, and cloud metadata hostnames; block loopback, RFC1918, unspecified, link-local, multicast, CGNAT `100.64.0.0/10`, and `169.254.169.254`. Literal IPs in the hostname use the same ranges. Public `http` hosts are allowed; private hosts are the gate, not the scheme.
 
-Inbound webhook / forward **save**, **fetch**, and **each redirect hop** call `validateSafeUrl`. Hostnames are re-checked after DNS (blocked if any A/AAAA is private). Redirects are followed manually (`redirect: "manual"`); a hop to metadata / RFC1918 / localhost is recorded as a failed delivery.
+Inbound webhook / forward **save**, **fetch**, and **each redirect hop** call `validateSafeUrl`. Hostnames are re-checked after DNS (blocked if any A/AAAA is private) via `recheckResolvedIps` in `src/safe-url.ts`. The admin logo probe uses the same helper. Redirects are followed manually (`redirect: "manual"`); a hop to metadata / RFC1918 / localhost is recorded as a failed delivery (or rejected on logo save).
 
 Default policy on this path: **https only**. `http://127.0.0.1` (and other private http) is allowed only when `ALLOW_PRIVATE_WEBHOOKS=1`. Public `http` is rejected at the webhook layer even though `validateSafeUrl` itself allows it. A bad config URL returns **400** with a clear hint (`blocked_destination` / `invalid_url`).
+
+`OUTBOUND_HTTP_URL` is **not** an operator-supplied UI field. It is a deploy-time hook the operator already trusts. The `http` adapter does not run `validateSafeUrl` on it. Do not expose it in settings; if you ever do, gate it with `validateSafeUrl` (and the DNS re-check) the same way as webhooks.
 
 Workers `fetch` cannot install a custom dialer (no restricted `DialContext`). Residual DNS-rebinding risk remains if the resolver is skipped.
 
@@ -303,7 +305,9 @@ Unauthorized → **401**. A mailbox/owner session on admin hook routes → **403
 - `X-Postgrove-Signature`: `v1=<hex>`
 - `X-Postgrove-Event`: `inbound`
 
-Signed string: `` `${timestamp}.${raw_json_body}` `` (UTF-8). MAC: **HMAC-SHA256**, hex digest. A missing or wrong `webhook_secret` must fail verification. Suggested clock skew: ±5 minutes.
+Signed string: `` `${timestamp}.${raw_json_body}` `` (UTF-8). MAC: **HMAC-SHA256**, hex digest. A missing or wrong `webhook_secret` must fail verification (constant-time hex compare). Suggested clock skew: ±5 minutes.
+
+**Secret at rest.** D1 stores `webhook_secret` as `enc:v1:` (AES-GCM, key from `SESSION_SECRET`) so a DB dump is not the signing key. Mint and rotate still return the plaintext **once**; later `GET` only has `webhook_secret_set`. Delivery opens the envelope to sign. Leftover plaintext rows (pre-`0014_webhook_secret_envelope.sql`) are wrapped on the next read or save. After a `SESSION_SECRET` rotation, re-rotate hook secrets — old envelopes will not open. A one-way hash (like API tokens) cannot be used here because outbound signing still needs the plaintext.
 
 Payload fields: `event`, `message_id`, `mailbox_id`, `from`, `to`, `subject`, `snippet`, `text`, `received_at`.
 
@@ -348,7 +352,7 @@ Design: **owner = signed HttpOnly session cookie** after `POST /auth/login`. **A
 | **Admin** | `Authorization: Bearer <ADMIN_TOKEN>`, `POST /admin/session`, or a `users.role=admin` member session | List/create/disable members, open addresses, read-only mail audit. Admin users skip per-user quotas (`0` = unlimited). |
 | **Mailbox user** | `POST /auth/login` with a bound address + that member's token | Only mailboxes listed in `user_mailboxes`. Creating addresses / storing inbound / sending are quota-checked. |
 
-**Shared `OWNER_TOKEN` vs member tokens.** `OWNER_TOKEN` is still one shared secret for every mailbox — not a per-address password. Treat it like a deploy secret. Members get their own token from `POST /admin/users` (returned once). A disabled member cannot keep using an old cookie (`user_disabled`).
+**Shared `OWNER_TOKEN` vs member tokens.** `OWNER_TOKEN` is still one shared secret for every mailbox — not a per-address password. Treat it like a deploy / break-glass secret. **Production should prefer member tokens + admin** (`POST /admin/users`, admin-role member or `ADMIN_TOKEN`) for day-to-day login; keep `OWNER_TOKEN` for recovery, not shared operator sign-in. Members get their own token from `POST /admin/users` (returned once). A disabled member cannot keep using an old cookie (`user_disabled`).
 
 Copy `.dev.vars.example` to `.dev.vars` (gitignored). The example values work locally; change them before any remote deploy and set the same names with `npx wrangler secret put`.
 
@@ -378,7 +382,7 @@ Sign out (clears the cookie on the client; sessions are stateless HMAC tokens):
 curl -i -c /tmp/pg-cookies -X POST http://127.0.0.1:8787/auth/logout
 ```
 
-**Login rate limit.** `POST /auth/login` allows **8 attempts per 10 minutes per IP** (`CF-Connecting-IP`, else the first `X-Forwarded-For` hop). Over the limit returns **429** with `Retry-After` and a hint such as “Too many login attempts from this network…”. Counters live in Worker memory, so a new isolate starts a fresh window. That is enough for a single-operator MVP; a shared store (Durable Object / KV) can come later if you run many isolates.
+**Login rate limit.** `POST /auth/login` allows **8 attempts per 10 minutes per IP** (`CF-Connecting-IP`, else the first `X-Forwarded-For` hop). Over the limit returns **429** with `Retry-After` and a hint such as “Too many login attempts from this network…”. Counters live in Worker memory **per isolate**, so a new isolate starts a fresh window. That residual is accepted for a single-operator box. A shared Durable Object / KV limiter is a follow-up if you run many isolates; it is not required for v0.1.
 
 **Rotate `SESSION_SECRET` to revoke sessions.** Logout only deletes the cookie in that browser. Tokens are HMAC-signed and are not stored on the server, so they stay valid until expiry (7 days) if someone copied the cookie. To revoke every owner session: put a new `SESSION_SECRET` (`npx wrangler secret put SESSION_SECRET`, or edit `.dev.vars` locally) and redeploy / restart Wrangler. Old cookies fail verify. `OWNER_TOKEN` / `ADMIN_TOKEN` do not rotate sessions; change those when the secret leaked, then rotate `SESSION_SECRET` as well.
 
@@ -524,7 +528,7 @@ curl -sS -o /dev/stderr -w '%{http_code}\n' \
 | Inbound attachments | 10 MiB / 10 files | inbound reject (see above) |
 | Aliases per mailbox | **50** | **409** `alias_limit` |
 
-Override REST knobs with `REST_RATE_LIMIT_MAX`, `REST_RATE_LIMIT_WINDOW_MS`, `SIGNUP_RATE_LIMIT_MAX`, `SIGNUP_RATE_LIMIT_WINDOW_MS`, `REST_BODY_MAX_BYTES`, `REST_QUOTA_REQUESTS_DAILY`, `REST_QUOTA_SEND_DAILY` in `.dev.vars` / Worker vars. A new isolate starts a fresh rate-limit window. Daily quotas live in D1 (`api_token_usage`) and reset at midnight UTC.
+Override REST knobs with `REST_RATE_LIMIT_MAX`, `REST_RATE_LIMIT_WINDOW_MS`, `SIGNUP_RATE_LIMIT_MAX`, `SIGNUP_RATE_LIMIT_WINDOW_MS`, `REST_BODY_MAX_BYTES`, `REST_QUOTA_REQUESTS_DAILY`, `REST_QUOTA_SEND_DAILY` in `.dev.vars` / Worker vars. Login, REST, and signup counters are **per isolate** — a new isolate starts a fresh window (the same residual as login). Daily quotas live in D1 (`api_token_usage`) and reset at midnight UTC. A shared Durable Object limiter is documented as a follow-up, not part of this cut.
 
 ### Dev inbox API (own domain only)
 
@@ -667,7 +671,7 @@ Then, in the Cloudflare dashboard, enable Email Routing for your domain and add 
 | `src/admin.ts` | `/admin` 值守台 + JSON users / mailboxes / audit / inbound deliveries / stats / branding |
 | `src/analytics.ts` | Light overview counts (users, today's mail, attachment MB) |
 | `src/i18n.ts` | en / zh copy; `Accept-Language` + settings cookie |
-| `src/branding.ts` | Site title / logo URL / accent; `validateSafeUrl` on logo save and fetch |
+| `src/branding.ts` | Site title / logo URL / accent; `validateSafeUrl` + shared DNS IP re-check on logo save and fetch |
 | `src/view.ts` | Shared shell (locale + branding) for HTML |
 | `src/health.ts` | `GET /healthz` |
 | `src/inbound.ts` | Email Routing stub persist + +tag / alias resolve + attachment limits |
@@ -680,8 +684,8 @@ Then, in the Cloudflare dashboard, enable Email Routing for your domain and add 
 | `src/threads.ts` | Inbox thread grouping (citation, then subject fallback) |
 | `src/triage.ts` | Search `LIKE` helpers + unread / star filters |
 | `src/outbound.ts` | Pluggable outbound adapters (`stub` / `resend` / `http`) |
-| `src/safe-url.ts` | SSRF guard for operator-supplied outbound URLs (webhooks / forward) |
-| `src/webhooks.ts` | Inbound signed webhook + forward; `validateSafeUrl` on save/fetch/redirect |
+| `src/safe-url.ts` | SSRF guard + shared `recheckResolvedIps` (webhooks / forward / logo) |
+| `src/webhooks.ts` | Inbound signed webhook + forward; secret enveloped at rest; `validateSafeUrl` on save/fetch/redirect |
 | `src/send.ts` | Validate + persist outbound attempts |
 | `migrations/0001_init.sql` | D1 `mailboxes` + `messages` |
 | `migrations/0002_message_body.sql` | `messages.body_text` |
@@ -696,6 +700,7 @@ Then, in the Cloudflare dashboard, enable Email Routing for your domain and add 
 | `migrations/0011_site_settings.sql` | Site title / logo / accent |
 | `migrations/0012_dev_inboxes.sql` | Ephemeral developer inboxes (own domain; not +tag aliases) |
 | `migrations/0013_aliases_api_key_quotas.sql` | `mailbox_aliases` + token kind/quotas + `api_token_usage` |
+| `migrations/0014_webhook_secret_envelope.sql` | `webhook_secret` envelope-at-rest contract (lazy upgrade of leftover plaintext) |
 | `scripts/seed-local.sql` | Local sample mailboxes + messages (not for remote) |
 | `scripts/seed-grove-note.txt` | Local sample attachment bytes |
 | `wrangler.jsonc` | Worker + D1 + R2 bindings (placeholders) |
