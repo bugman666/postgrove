@@ -11,12 +11,22 @@
 #
 # Production: `npx wrangler secret put SESSION_SECRET` (and OWNER_TOKEN, ADMIN_TOKEN).
 # Do not reuse these placeholders remotely.
+#
+# OWNER_TOKEN is one shared secret for every mailbox — not a per-address password.
+# Anyone who has it can open any active address. Per-user passwords wait for multi-user.
+#
+# SESSION_SECRET signs the owner cookie. Sessions are stateless HMAC tokens: logout
+# only clears the browser cookie. Rotate SESSION_SECRET (and restart / redeploy)
+# to revoke every owner session at once.
+#
+# POST /auth/login is limited to 8 attempts per 10 minutes per IP (in-memory,
+# per Worker isolate). A 429 includes a human-readable hint and Retry-After.
 
 # HMAC secret for the owner session cookie (min 16 characters). Rotate to revoke sessions.
 SESSION_SECRET=change-me-local-session-secret
 
 # Shared mailbox-owner token for POST /auth/login (min 8 characters).
-# Any active mailbox address plus this token issues a session for that address.
+# Not a per-address password: any active mailbox plus this token issues a session.
 OWNER_TOKEN=change-me-local-owner-token
 
 # Admin bearer token for /admin/* (Authorization: Bearer …, min 8 characters).

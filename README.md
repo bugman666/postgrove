@@ -27,7 +27,7 @@ Open addresses on a domain you own, receive mail at the edge, read it in a web i
 - Calendar, contacts, or replacing a full IMAP/SMTP stack
 - Real reply / reply-all / forward (the inbox shows a reply entry only)
 - Compose + outbound provider
-- Multi-user / RBAC (owner session is in; hardening is a later track)
+- Multi-user / RBAC / per-address passwords (one shared `OWNER_TOKEN` until then)
 
 ## Stack (intended)
 
@@ -115,7 +115,9 @@ Expect JSON with `"ok": true` and `"db": "ready"` after migrations. A `503` with
 
 ### Auth (mailbox owner session + admin bearer)
 
-Design: **owner = signed HttpOnly session cookie** after `POST /auth/login`. **Admin = `Authorization: Bearer <ADMIN_TOKEN>`**. One shared `OWNER_TOKEN` proves mailbox ownership; the session is bound to the address you logged in as. Inbox HTML and JSON call `requireOwner` from `src/auth.ts`.
+Design: **owner = signed HttpOnly session cookie** after `POST /auth/login`. **Admin = `Authorization: Bearer <ADMIN_TOKEN>`**. Inbox HTML and JSON call `requireOwner` from `src/auth.ts`.
+
+**Shared `OWNER_TOKEN` vs per-address passwords.** There is one shared `OWNER_TOKEN` for every mailbox. It is not a per-address password. Anyone who has the token can log in as any active address; the session cookie is then bound to that address. Per-user / per-mailbox passwords wait for multi-user (P2). Treat `OWNER_TOKEN` like a deploy secret, not a login you share with guests.
 
 Copy `.dev.vars.example` to `.dev.vars` (gitignored). The example values work locally; change them before any remote deploy and set the same names with `npx wrangler secret put`.
 
@@ -145,6 +147,14 @@ Sign out (clears the cookie on the client; sessions are stateless HMAC tokens):
 curl -i -c /tmp/pg-cookies -X POST http://127.0.0.1:8787/auth/logout
 ```
 
+**Login rate limit.** `POST /auth/login` allows **8 attempts per 10 minutes per IP** (`CF-Connecting-IP`, else the first `X-Forwarded-For` hop). Over the limit returns **429** with `Retry-After` and a hint such as “Too many login attempts from this network…”. Counters live in Worker memory, so a new isolate starts a fresh window. That is enough for a single-operator MVP; a shared store (Durable Object / KV) can come later if you run many isolates.
+
+**Rotate `SESSION_SECRET` to revoke sessions.** Logout only deletes the cookie in that browser. Tokens are HMAC-signed and are not stored on the server, so they stay valid until expiry (7 days) if someone copied the cookie. To revoke every owner session: put a new `SESSION_SECRET` (`npx wrangler secret put SESSION_SECRET`, or edit `.dev.vars` locally) and redeploy / restart Wrangler. Old cookies fail verify. `OWNER_TOKEN` / `ADMIN_TOKEN` do not rotate sessions; change those when the secret leaked, then rotate `SESSION_SECRET` as well.
+
+**CSRF (cookie + SameSite=Lax + Origin check).** The session cookie is `HttpOnly`, `SameSite=Lax`, and `Secure` on HTTPS. Cross-site form POSTs therefore do not send it on modern browsers. Cookie-authenticated writes (`POST /auth/logout`, inbox delete, `DELETE /api/messages/…`, anything else that calls `requireOwner` with POST/PUT/PATCH/DELETE) also require `Origin` (or `Referer` if `Origin` is missing) to match this Worker. Same-origin HTML forms and `fetch` already send `Origin`, so the inbox UI did not need a rewrite. Missing both headers is allowed for curl and scripts. That is enough for this MVP.
+
+Still open for P2: a required custom header or double-submit token (so missing-`Origin` clients cannot be used as a CSRF hole), CSRF on GET side effects (mark-as-read), per-address passwords, and an expiring admin bearer.
+
 Admin stub (later mailbox-management routes can reuse `requireAdmin`):
 
 ```bash
@@ -152,7 +162,7 @@ curl -sS -H 'Authorization: Bearer change-me-local-admin-token' \
   http://127.0.0.1:8787/admin/ping
 ```
 
-Expect `"role": "admin"`. A missing or wrong bearer returns **401**.
+Expect `"role": "admin"`. A missing or wrong bearer returns **401**. Admin is a bearer token, not a cookie, so browser CSRF does not apply the same way. It also does not expire — treat a leaked `ADMIN_TOKEN` as “rotate now”.
 
 ### Inbound stub (local Email Routing)
 
