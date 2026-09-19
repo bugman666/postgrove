@@ -6,9 +6,12 @@ import {
   requireAdmin,
   requireAdminOrOwner,
   requireOwner,
+  rejectCrossOriginMutation,
+  resetLoginRateLimitForTests,
   signOwnerSession,
   timingSafeEqualString,
   verifyOwnerSession,
+  LOGIN_RATE_LIMIT_MAX,
   OWNER_SESSION_COOKIE,
 } from "../src/auth.ts";
 
@@ -122,7 +125,10 @@ test("login issues a session cookie for an active mailbox", async () => {
   const response = await handleAuthRoutes(
     new Request("http://127.0.0.1:8787/auth/login", {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: {
+        "content-type": "application/json",
+        "cf-connecting-ip": "203.0.113.10",
+      },
       body: JSON.stringify({ address: MAILBOX.address, token: OWNER }),
     }),
     env(),
@@ -151,7 +157,10 @@ test("login with a wrong token is 401", async () => {
   const response = await handleAuthRoutes(
     new Request("http://127.0.0.1:8787/auth/login", {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: {
+        "content-type": "application/json",
+        "cf-connecting-ip": "203.0.113.11",
+      },
       body: JSON.stringify({ address: MAILBOX.address, token: "nope-nope" }),
     }),
     env(),
@@ -205,6 +214,126 @@ test("auth routes do not claim /healthz", async () => {
     env(),
   );
   assert.equal(response, null);
+});
+
+test("login rate limit returns 429 with a hint after too many attempts", async () => {
+  resetLoginRateLimitForTests();
+  const ip = "203.0.113.21";
+  const attempt = () =>
+    handleAuthRoutes(
+      new Request("http://127.0.0.1:8787/auth/login", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "cf-connecting-ip": ip,
+        },
+        body: JSON.stringify({ address: MAILBOX.address, token: "nope-nope" }),
+      }),
+      env(),
+    );
+
+  for (let i = 0; i < LOGIN_RATE_LIMIT_MAX; i++) {
+    const response = await attempt();
+    assert.ok(response);
+    assert.equal(response.status, 401);
+  }
+
+  const limited = await attempt();
+  assert.ok(limited);
+  assert.equal(limited.status, 429);
+  assert.ok(limited.headers.get("retry-after"));
+  const body = (await limited.json()) as {
+    ok: boolean;
+    error: string;
+    hint: string;
+    retry_after_seconds: number;
+  };
+  assert.equal(body.ok, false);
+  assert.equal(body.error, "rate_limited");
+  assert.match(body.hint, /Too many login attempts/);
+  assert.ok(body.retry_after_seconds >= 1);
+
+  const otherIp = await handleAuthRoutes(
+    new Request("http://127.0.0.1:8787/auth/login", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "cf-connecting-ip": "203.0.113.22",
+      },
+      body: JSON.stringify({ address: MAILBOX.address, token: "nope-nope" }),
+    }),
+    env(),
+  );
+  assert.ok(otherIp);
+  assert.equal(otherIp.status, 401);
+});
+
+test("cross-origin mutating owner requests are rejected", async () => {
+  const token = await signOwnerSession(SECRET, {
+    mailboxId: MAILBOX.id,
+    address: MAILBOX.address,
+  });
+  const cookie = `${OWNER_SESSION_COOKIE}=${token}`;
+
+  const blocked = await requireOwner(
+    new Request("http://127.0.0.1:8787/api/messages/x", {
+      method: "DELETE",
+      headers: { cookie, origin: "https://evil.example" },
+    }),
+    env(),
+  );
+  assert.equal(blocked.ok, false);
+  if (!blocked.ok) {
+    assert.equal(blocked.response.status, 403);
+    const body = (await blocked.response.json()) as { error: string; hint: string };
+    assert.equal(body.error, "csrf_rejected");
+    assert.match(body.hint, /Origin/);
+  }
+
+  const sameOrigin = await requireOwner(
+    new Request("http://127.0.0.1:8787/api/messages/x", {
+      method: "DELETE",
+      headers: { cookie, origin: "http://127.0.0.1:8787" },
+    }),
+    env(),
+  );
+  assert.equal(sameOrigin.ok, true);
+
+  const curlStyle = await requireOwner(
+    new Request("http://127.0.0.1:8787/api/messages/x", {
+      method: "DELETE",
+      headers: { cookie },
+    }),
+    env(),
+  );
+  assert.equal(curlStyle.ok, true);
+
+  const getIgnored = await requireOwner(
+    new Request("http://127.0.0.1:8787/auth/session", {
+      headers: { cookie, origin: "https://evil.example" },
+    }),
+    env(),
+  );
+  assert.equal(getIgnored.ok, true);
+
+  const badReferer = rejectCrossOriginMutation(
+    new Request("http://127.0.0.1:8787/auth/logout", {
+      method: "POST",
+      headers: { referer: "https://evil.example/page" },
+    }),
+  );
+  assert.ok(badReferer);
+  assert.equal(badReferer.status, 403);
+
+  const logout = await handleAuthRoutes(
+    new Request("http://127.0.0.1:8787/auth/logout", {
+      method: "POST",
+      headers: { origin: "https://evil.example" },
+    }),
+    env(),
+  );
+  assert.ok(logout);
+  assert.equal(logout.status, 403);
 });
 
 test("missing secrets fail closed with 503", async () => {

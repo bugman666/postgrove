@@ -6,9 +6,21 @@ export const OWNER_SESSION_COOKIE = "postgrove_session";
 /** Owner session lifetime. Rotate SESSION_SECRET to revoke all sessions. */
 export const SESSION_MAX_AGE_SECONDS = 7 * 24 * 60 * 60;
 
+/** Login attempts allowed per IP per window. In-memory, per Worker isolate. */
+export const LOGIN_RATE_LIMIT_MAX = 8;
+/** Fixed window for POST /auth/login (10 minutes). */
+export const LOGIN_RATE_LIMIT_WINDOW_MS = 10 * 60 * 1000;
+
 const SESSION_VERSION = 1;
 const MIN_SESSION_SECRET_LENGTH = 16;
 const MIN_TOKEN_LENGTH = 8;
+const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+const RATE_LIMIT_PRUNE_AT = 512;
+
+type LoginRateBucket = { count: number; resetAt: number };
+
+/** Best-effort per-isolate counters. A new isolate starts a fresh window. */
+const loginAttempts = new Map<string, LoginRateBucket>();
 
 const JSON_HEADERS = {
   "content-type": "application/json; charset=utf-8",
@@ -40,12 +52,16 @@ interface SessionPayload {
 
 /**
  * Auth HTTP surface. Returns null when the request is not an auth/admin route
- * so the Worker can keep /healthz public and leave inbox routes to #16.
+ * so the Worker can keep /healthz public.
  *
  * Owner: POST /auth/login { address, token: OWNER_TOKEN } → HttpOnly cookie.
- * Inbox should call `requireOwner` and return `result.response` when `ok` is false.
+ * OWNER_TOKEN is one shared secret for every mailbox (not a per-address password).
+ * Inbox calls `requireOwner` and returns `result.response` when `ok` is false.
  *
  * Admin: Authorization: Bearer <ADMIN_TOKEN>. Use `requireAdmin`.
+ *
+ * Login is rate-limited per IP. Cookie-authenticated writes also check Origin
+ * (or Referer) against this Worker. Rotate SESSION_SECRET to revoke all sessions.
  */
 export async function handleAuthRoutes(
   request: Request,
@@ -78,6 +94,11 @@ export async function requireOwner(
   const configured = sessionSecret(env);
   if (!configured.ok) {
     return configured;
+  }
+
+  const csrf = rejectCrossOriginMutation(request);
+  if (csrf) {
+    return { ok: false, response: csrf };
   }
 
   const token = cookieValue(request.headers.get("cookie"), OWNER_SESSION_COOKIE);
@@ -216,6 +237,11 @@ async function handleLogin(request: Request, env: Env): Promise<Response> {
     return owner.response;
   }
 
+  const limited = consumeLoginAttempt(request);
+  if (!limited.ok) {
+    return limited.response;
+  }
+
   let body: unknown;
   try {
     body = await request.json();
@@ -274,6 +300,10 @@ async function handleLogin(request: Request, env: Env): Promise<Response> {
 }
 
 function handleLogout(request: Request): Response {
+  const csrf = rejectCrossOriginMutation(request);
+  if (csrf) {
+    return csrf;
+  }
   return json({ ok: true }, 200, {
     "set-cookie": serializeCookie("", request, 0),
   });
@@ -312,6 +342,117 @@ async function lookupActiveMailbox(
     return null;
   }
   return { id: row.id, address: row.address };
+}
+
+/**
+ * Reject cookie-authenticated writes whose Origin/Referer is some other site.
+ * SameSite=Lax already drops the cookie on most cross-site POSTs; this also
+ * covers same-site / different-origin cases (sibling subdomains) and older
+ * browsers that still send the cookie. Missing both headers is allowed so
+ * curl and scripts keep working — browsers send Origin on POST.
+ *
+ * GET/HEAD/OPTIONS skip this check (inbox mark-as-read is still a GET).
+ */
+export function rejectCrossOriginMutation(request: Request): Response | null {
+  if (!MUTATING_METHODS.has(request.method.toUpperCase())) {
+    return null;
+  }
+
+  const expected = originOf(request.url);
+  const originHeader = request.headers.get("origin");
+  if (originHeader) {
+    return originsEqual(originHeader, expected)
+      ? null
+      : csrfRejected("Origin does not match this site. Cookie-authenticated writes must be same-origin.");
+  }
+
+  const referer = request.headers.get("referer");
+  if (!referer) {
+    return null;
+  }
+  try {
+    return originsEqual(new URL(referer).origin, expected)
+      ? null
+      : csrfRejected("Referer does not match this site. Cookie-authenticated writes must be same-origin.");
+  } catch {
+    return csrfRejected("Invalid Referer. Cookie-authenticated writes must be same-origin.");
+  }
+}
+
+function csrfRejected(hint: string): Response {
+  return jsonError(403, "csrf_rejected", hint);
+}
+
+function originOf(url: string): string {
+  const parsed = new URL(url);
+  return parsed.origin;
+}
+
+function originsEqual(left: string, right: string): boolean {
+  try {
+    return new URL(left).origin === new URL(right).origin;
+  } catch {
+    return false;
+  }
+}
+
+function consumeLoginAttempt(
+  request: Request,
+  now = Date.now(),
+): { ok: true } | { ok: false; response: Response } {
+  const key = loginClientKey(request);
+  const existing = loginAttempts.get(key);
+  if (!existing || existing.resetAt <= now) {
+    loginAttempts.set(key, { count: 1, resetAt: now + LOGIN_RATE_LIMIT_WINDOW_MS });
+    pruneLoginAttempts(now);
+    return { ok: true };
+  }
+  if (existing.count >= LOGIN_RATE_LIMIT_MAX) {
+    const retryAfter = Math.max(1, Math.ceil((existing.resetAt - now) / 1000));
+    return {
+      ok: false,
+      response: json(
+        {
+          ok: false,
+          error: "rate_limited",
+          hint: `Too many login attempts from this network. Wait a few minutes and try again (${LOGIN_RATE_LIMIT_MAX} per ${LOGIN_RATE_LIMIT_WINDOW_MS / 60_000} minutes per IP).`,
+          retry_after_seconds: retryAfter,
+        },
+        429,
+        { "retry-after": String(retryAfter) },
+      ),
+    };
+  }
+  existing.count += 1;
+  return { ok: true };
+}
+
+function loginClientKey(request: Request): string {
+  const cf = request.headers.get("cf-connecting-ip")?.trim();
+  if (cf) {
+    return `ip:${cf}`;
+  }
+  const forwarded = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim();
+  if (forwarded) {
+    return `ip:${forwarded}`;
+  }
+  return "ip:unknown";
+}
+
+function pruneLoginAttempts(now: number): void {
+  if (loginAttempts.size < RATE_LIMIT_PRUNE_AT) {
+    return;
+  }
+  for (const [key, bucket] of loginAttempts) {
+    if (bucket.resetAt <= now) {
+      loginAttempts.delete(key);
+    }
+  }
+}
+
+/** Test helper: drop in-memory login counters. */
+export function resetLoginRateLimitForTests(): void {
+  loginAttempts.clear();
 }
 
 function sessionSecret(
