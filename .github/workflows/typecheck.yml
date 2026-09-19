@@ -30,3 +30,11 @@ jobs:
 
       - name: Unit tests
         run: npm test
+
+      - name: Apply D1 migrations to empty local database
+        env:
+          CI: "true"
+          WRANGLER_SEND_METRICS: "false"
+        run: |
+          persist="$(mktemp -d)"
+          npx wrangler d1 migrations apply postgrove --local --persist-to "$persist"

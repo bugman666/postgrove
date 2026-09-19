@@ -69,7 +69,7 @@ Requires Node.js 22+ (`npm test` uses `--experimental-strip-types`). No Cloudfla
 
 ```bash
 npm install
-npm run check                    # tsc --noEmit; CI also runs npm test
+npm run check                    # tsc --noEmit; CI also runs npm test + empty-DB migrations
 cp .dev.vars.example .dev.vars   # local SESSION_SECRET, OWNER_TOKEN, ADMIN_TOKEN, OUTBOUND_PROVIDER=stub, attachment caps, optional Turnstile
 npm run db:migrate:local
 npm run seed:local               # sample mailboxes + messages + one R2 attachment (local only)
@@ -93,6 +93,8 @@ const env = { DB: db.asDatabase(), SESSION_SECRET, OWNER_TOKEN, ADMIN_TOKEN };
 ```
 
 `MemoryR2` is in the same module for inbound persist / download tests. If a new SQL path misses, extend the helper — do not add another in-file MemoryD1. MIME malice samples live under `test/fixtures/mime/` (nested multipart, odd boundary, lying Content-Type, path-traversal names, missing boundary, oversized part).
+
+After migrate + seed + `npm run dev`, the #44 gate is `npm run smoke:local` (`scripts/smoke-local.sh`): S1 login, S2 inbox read/delete, S3 compose → Sent, S4 reply/forward prefill + stub send, S5 attachment download + 401, S8 create → wait(408) → extract OTP → close twice. No Cloudflare account. The script mutates seed rows; reset `.wrangler/state` and re-seed if a seed id 404s. CI does **not** start Wrangler (too heavy for Actions); it still applies `0001`–latest to an empty local D1.
 
 ### Inbox (local)
 
@@ -745,6 +747,7 @@ Then, in the Cloudflare dashboard, enable Email Routing for your domain and add 
 | `scripts/seed-grove-note.txt` | Local sample attachment bytes |
 | `test/helpers/memory-d1.ts` | Shared in-memory D1 / R2 for unit tests |
 | `test/fixtures/mime/` | Malicious / odd inbound MIME samples |
+| `scripts/smoke-local.sh` | S1–S5 / S8 curl pack (`npm run smoke:local` after `wrangler dev`) |
 | `wrangler.jsonc` | Worker + D1 + R2 bindings (placeholders) |
 | `.dev.vars.example` | Local secret / outbound / attachment-cap / Turnstile / REST limit template |
 
@@ -754,7 +757,7 @@ MIT. See `LICENSE`.
 
 ## CI
 
-GitHub Actions runs `npm run check` (`tsc --noEmit`) and `npm test` on pull requests and `main`. No repository secrets are required.
+GitHub Actions runs `npm run check` (`tsc --noEmit`), `npm test`, and `wrangler d1 migrations apply postgrove --local` against an **empty** persist directory (0001 through the latest file in `migrations/`). No repository secrets and no Cloudflare account. The Wrangler HTTP smoke (`npm run smoke:local`) stays a local gate after `wrangler dev` + seed — see #44 / #50.
 
 ## Contributing
 
