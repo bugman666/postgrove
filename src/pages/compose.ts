@@ -1,3 +1,4 @@
+import { humanErrorMessage, layeredBannerHtml } from "../error-banner.ts";
 import { describeOutbound } from "../outbound.ts";
 import { composeHeading, type ComposeMode, type ComposePrefill } from "../reply.ts";
 import type { MailboxRecord, MessageRecord, OutboundAttemptRecord } from "../store.ts";
@@ -66,14 +67,14 @@ export function renderComposePage(
   const heading = composeHeading(mode);
   const banners: string[] = [];
   if (opts.highlighted) {
-    banners.push(attemptBanner(opts.highlighted));
+    banners.push(attemptBanner(opts.highlighted, shell));
   }
   if (opts.savedDraft) {
     banners.push(`<p class="banner success">${escapeHtml(tr(shell, "banner.draft-saved"))}</p>`);
   }
   if (opts.formError) {
     banners.push(
-      `<p class="banner danger">${escapeHtml(opts.formError)}</p>`,
+      layeredBannerHtml({ locale: shell.locale, tone: "danger", message: opts.formError }),
     );
   }
   if (!opts.highlighted && mode !== "new") {
@@ -82,7 +83,15 @@ export function renderComposePage(
     );
   }
   if (!opts.highlighted && outbound.provider === "unset") {
-    banners.push(`<p class="banner danger">${escapeHtml(outbound.hint)}</p>`);
+    banners.push(
+      layeredBannerHtml({
+        locale: shell.locale,
+        tone: "danger",
+        message: tr(shell, "error.outbound-unset"),
+        code: "outbound_not_configured",
+        detail: outbound.hint,
+      }),
+    );
   } else if (!opts.highlighted && outbound.provider === "stub") {
     banners.push(`<p class="banner">${escapeHtml(outbound.hint)}</p>`);
   }
@@ -161,7 +170,7 @@ export function renderComposePage(
   });
 }
 
-export function attemptBanner(row: OutboundAttemptRecord): string {
+export function attemptBanner(row: OutboundAttemptRecord, shell: Shell): string {
   if (row.status === "sent") {
     const extra =
       row.provider === "stub"
@@ -172,9 +181,16 @@ export function attemptBanner(row: OutboundAttemptRecord): string {
   if (row.status === "pending") {
     return `<p class="banner">发送还在处理：已记下出站记录，正在向提供商投递（最多 ${row.max_attempts} 次）。</p>`;
   }
-  const reason = row.error || "outbound_failed";
-  const next = row.hint || "检查出站配置或稍后重试。";
-  return `<p class="banner danger">没发出去：${escapeHtml(reason)}。${escapeHtml(next)}</p>`;
+  const code = row.error || "outbound_failed";
+  const message =
+    humanErrorMessage(shell.locale, code) || tr(shell, "error.send-failed");
+  return layeredBannerHtml({
+    locale: shell.locale,
+    tone: "danger",
+    message,
+    code,
+    detail: row.hint,
+  });
 }
 
 export function renderAttemptHistory(

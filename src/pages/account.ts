@@ -1,6 +1,8 @@
 import type { MailboxAliasRecord } from "../aliases.ts";
 import { renderAliasPanelHtml } from "../aliases.ts";
+import type { ApiTokenRecord } from "../api-tokens.ts";
 import type { MailboxActor } from "../auth.ts";
+import { layeredBannerHtml, pageErrorBanner, type PageError } from "../error-banner.ts";
 import { EMPTY_ART, escapeHtml, formatReceived } from "../html.ts";
 import type { MailboxRecord } from "../store.ts";
 import { boxPath, inboxHref } from "../ui-paths.ts";
@@ -12,10 +14,10 @@ export function renderAddressesPage(
   mailboxes: MailboxRecord[],
   nav: NavId,
   unreadCount = 0,
-  error: string | null = null,
+  error: PageError = null,
 ): string {
   const current = mailboxes[0] ?? null;
-  const banner = error ? `<p class="banner danger">${escapeHtml(error)}</p>` : "";
+  const banner = pageErrorBanner(shell.locale, error);
   const form = `<form class="grove-form" method="post" action="/addresses">
       <label>新地址
         <input class="search" name="address" type="email" required placeholder="notes@example.test">
@@ -28,7 +30,7 @@ export function renderAddressesPage(
     <p class="banner">主人会话开地址不占成员配额。成员会话会记入该成员的地址配额，超了会明确报错。</p>`;
   let content: string;
   if (mailboxes.length === 0) {
-    content = `${emptyBlock(tr(shell, "empty.addresses"))}${form}`;
+    content = `${emptyBlock(tr(shell, "empty.addresses"), "brand", tr(shell, "empty.addresses-alt"))}${form}`;
   } else {
     content = `<ul class="addr-list">${mailboxes
       .map(
@@ -62,9 +64,10 @@ export function renderSettingsPage(
   hook: PublicHookConfig | null,
   deliveries: InboundDeliveryRecord[],
   aliases: MailboxAliasRecord[],
+  tokens: ApiTokenRecord[],
   unreadCount: number,
   shell: Shell,
-  error: string | null,
+  error: PageError,
   saved: boolean,
   langUpdated: boolean,
   aliasSaved: boolean,
@@ -75,7 +78,7 @@ export function renderSettingsPage(
       : "这是主人会话（OWNER_TOKEN）。只绑在你登录的那一个地址上。";
   const banners: string[] = [];
   if (error) {
-    banners.push(`<p class="banner danger">${escapeHtml(error)}</p>`);
+    banners.push(pageErrorBanner(shell.locale, error));
   }
   if (saved) {
     banners.push(`<p class="banner success">${escapeHtml(tr(shell, "banner.hooks-saved"))}</p>`);
@@ -185,6 +188,7 @@ export function renderSettingsPage(
       <div class="page-card">
         ${banners.join("")}
         ${languageForm}
+        ${renderApiKeyPanel(shell, tokens)}
         ${renderAliasPanelHtml(mailbox, aliases, {
           heading: tr(shell, "heading.aliases"),
           hint: tr(shell, "banner.alias-hint"),
@@ -225,8 +229,12 @@ export function renderLoginPage(shell: Shell, error: string, hint: string): stri
       ${brandLink(shell, "/")}
       <div class="page-head"><h1>${escapeHtml(tr(shell, "heading.login"))}</h1></div>
       <div class="page-card">
-        <p class="banner">${escapeHtml(tr(shell, "banner.login-expired"))}</p>
-        <p class="banner"><code class="mono">${escapeHtml(error)}</code> — ${escapeHtml(hint)}</p>
+        ${layeredBannerHtml({
+          locale: shell.locale,
+          message: tr(shell, "error.session"),
+          code: error,
+          detail: hint,
+        })}
         <form id="login-form" class="login-form">
           <label>地址
             <input name="address" class="search" type="email" autocomplete="username" value="inbox@example.test" required>
@@ -262,7 +270,7 @@ export function renderLoginPage(shell: Shell, error: string, hint: string): stri
               location.href = "/";
               return;
             }
-            err.textContent = result.body.hint || result.body.error || "登录失败。";
+            err.textContent = result.body.hint || "登录失败。重新登录后再继续。";
             err.hidden = false;
           })
           .catch(function () {
@@ -274,6 +282,27 @@ export function renderLoginPage(shell: Shell, error: string, hint: string): stri
   </script>
 </body>
 </html>`;
+}
+
+function renderApiKeyPanel(shell: Shell, tokens: ApiTokenRecord[]): string {
+  const active = tokens.filter((row) => !row.revoked_at);
+  if (active.length === 0) {
+    return "";
+  }
+  const items = active
+    .map((row) => {
+      const label = row.label?.trim() ? row.label : row.token_prefix;
+      return `<li>
+        <span class="name">${escapeHtml(label)}</span>
+        <span class="mono">${escapeHtml(row.token_prefix)}…</span>
+      </li>`;
+    })
+    .join("");
+  return `<section id="api-key" class="grove-panel">
+          <h2>${escapeHtml(tr(shell, "nav.api-key"))}</h2>
+          <p class="banner">${escapeHtml(tr(shell, "banner.api-key-hint"))}</p>
+          <ul class="addr-list">${items}</ul>
+        </section>`;
 }
 
 export function renderForbidden(shell: Shell, mailbox: MailboxRecord | null, unreadCount = 0): string {

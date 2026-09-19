@@ -1,6 +1,10 @@
 export const SYSTEM_FOLDERS = ["inbox", "sent", "draft", "trash", "spam"] as const;
 export type SystemFolder = (typeof SYSTEM_FOLDERS)[number];
 
+/** Sidebar “Folders” group — inbox lives under Mailbox. */
+export const BOX_FOLDERS = ["sent", "draft", "trash", "spam"] as const;
+export type BoxFolder = (typeof BOX_FOLDERS)[number];
+
 /** Chinese labels for the system folders (IA / ROADMAP). Junk aliases to spam. */
 export const FOLDER_LABELS: Record<SystemFolder, string> = {
   inbox: "收件箱",
@@ -120,6 +124,19 @@ export function folderNavLinks(
   labels: Record<SystemFolder, string> = FOLDER_LABELS,
 ): { id: SystemFolder; label: string; href: string; active: boolean }[] {
   return SYSTEM_FOLDERS.map((id) => ({
+    id,
+    label: labels[id],
+    href: hrefFor(id),
+    active: active === id,
+  }));
+}
+
+export function boxFolderNavLinks(
+  active: string,
+  hrefFor: (folder: SystemFolder) => string,
+  labels: Record<SystemFolder, string> = FOLDER_LABELS,
+): { id: BoxFolder; label: string; href: string; active: boolean }[] {
+  return BOX_FOLDERS.map((id) => ({
     id,
     label: labels[id],
     href: hrefFor(id),

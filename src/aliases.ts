@@ -336,7 +336,7 @@ export function renderAliasPanelHtml(
   },
 ): string {
   if (!mailbox) {
-    return `<section class="grove-panel">
+    return `<section id="aliases" class="grove-panel">
           <h2>${escapeHtml(copy.heading)}</h2>
           <p class="banner">${escapeHtml(copy.empty)}</p>
         </section>`;
@@ -351,7 +351,7 @@ export function renderAliasPanelHtml(
         })
         .join("")}</ul>`
     : `<p class="banner">${escapeHtml(copy.empty)}</p>`;
-  return `<section class="grove-panel">
+  return `<section id="aliases" class="grove-panel">
           <h2>${escapeHtml(copy.heading)}</h2>
           <p class="banner">${escapeHtml(copy.hint)}</p>
           <p class="banner">${escapeHtml(copy.primary)} <span class="mono">${escapeHtml(mailbox.address)}</span></p>

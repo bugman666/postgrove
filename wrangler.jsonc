@@ -37,5 +37,12 @@
   "vars": {
     "ATTACHMENT_MAX_BYTES": "10485760",
     "ATTACHMENT_MAX_COUNT": "10"
-  }
+  },
+  "rules": [
+    {
+      "type": "Data",
+      "globs": ["**/*.jpg"],
+      "fallthrough": true
+    }
+  ]
 }

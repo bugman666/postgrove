@@ -7,7 +7,9 @@ import {
   listAliases,
   type MailboxAliasRecord,
 } from "./aliases.ts";
+import { listApiTokens, type ApiTokenRecord } from "./api-tokens.ts";
 import { actorUserId, requireOwner, type MailboxActor } from "./auth.ts";
+import type { PageError } from "./error-banner.ts";
 import { parseDraftFields, parseFolder } from "./folders.ts";
 import { html, redirect } from "./http.ts";
 import { parseLocalePreference, withLocaleCookie } from "./i18n.ts";
@@ -39,7 +41,8 @@ import {
   type MailboxRecord,
 } from "./store.ts";
 import { bindUserMailbox, getUser, mailboxAllowed } from "./users.ts";
-import { resolveShell, type Shell } from "./view.ts";
+import { resolveNavContext } from "./ui-nav.ts";
+import { resolveShell, withNav, type Shell } from "./view.ts";
 import { latestThreadMessage } from "./threads.ts";
 import {
   HookInputError,
@@ -82,16 +85,17 @@ export async function handleUi(
   env: Env,
   url: URL,
 ): Promise<Response> {
-  const shell = await resolveShell(request, env);
+  const baseShell = await resolveShell(request, env);
   const gate = await requireOwner(request, env);
   if (!gate.ok) {
-    return unauthorizedPage(shell, gate.response);
+    return unauthorizedPage(baseShell, gate.response);
   }
 
   const owner: MailboxActor = gate.principal;
   const path = url.pathname;
   const method = request.method;
   const ownMailbox = await getMailbox(env, owner.mailboxId);
+  const shell = withNav(baseShell, await resolveNavContext(env, owner, ownMailbox));
   let unreadCount = ownMailbox ? await countUnreadInbox(env, ownMailbox.id) : 0;
 
   if (path === "/") {
@@ -122,7 +126,9 @@ export async function handleUi(
       return pageMethodNotAllowed(shell);
     }
     const boxes = await visibleUiMailboxes(env, owner, ownMailbox);
-    return html(renderAddressesPage(shell, boxes, "addresses", unreadCount, url.searchParams.get("error")));
+    return html(
+      renderAddressesPage(shell, boxes, "addresses", unreadCount, url.searchParams.get("error")),
+    );
   }
 
   if (path === "/settings") {
@@ -413,7 +419,7 @@ async function handleSettingsSave(
       return redirect("/settings?alias=1");
     } catch (error) {
       const hint = error instanceof AliasInputError ? error.message : "没能保存别名。";
-      return renderSettings(env, owner, ownMailbox, unreadCount, shell, hint);
+      return renderSettings(env, owner, ownMailbox, unreadCount, shell, settingsError(error, hint));
     }
   }
   if (!ownMailbox) {
@@ -434,7 +440,7 @@ async function handleSettingsSave(
     return redirect("/settings?saved=1");
   } catch (error) {
     const hint = error instanceof HookInputError ? error.message : "没能保存入站通知。";
-    return renderSettings(env, owner, ownMailbox, unreadCount, shell, hint);
+    return renderSettings(env, owner, ownMailbox, unreadCount, shell, settingsError(error, hint));
   }
 }
 
@@ -444,7 +450,7 @@ async function renderSettings(
   mailbox: MailboxRecord | null,
   unreadCount: number,
   shell: Shell,
-  error: string | null = null,
+  error: PageError = null,
   saved: string | null = null,
   lang: string | null = null,
   aliasSaved: string | null = null,
@@ -452,11 +458,17 @@ async function renderSettings(
   let hook: PublicHookConfig | null = null;
   let deliveries: InboundDeliveryRecord[] = [];
   let aliases: MailboxAliasRecord[] = [];
+  let tokens: ApiTokenRecord[] = [];
   if (mailbox) {
     try {
       aliases = await listAliases(env, mailbox.id);
     } catch {
       aliases = [];
+    }
+    try {
+      tokens = await listApiTokens(env, mailbox.id);
+    } catch {
+      tokens = [];
     }
     try {
       const row = await getHookConfig(env, mailbox.id);
@@ -485,6 +497,7 @@ async function renderSettings(
       hook,
       deliveries,
       aliases,
+      tokens,
       unreadCount,
       shell,
       error,
@@ -733,6 +746,16 @@ async function renderCompose(
       shell,
     }),
   );
+}
+
+function settingsError(error: unknown, fallback: string): PageError {
+  if (error instanceof HookInputError) {
+    return { message: error.message, code: error.error, detail: error.message };
+  }
+  if (error instanceof AliasInputError) {
+    return { message: error.message, code: error.error, detail: error.message };
+  }
+  return fallback;
 }
 
 function stringField(value: unknown): string {
