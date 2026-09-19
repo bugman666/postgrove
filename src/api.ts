@@ -44,6 +44,15 @@ import {
   type MessageThread,
 } from "./threads.ts";
 import { parseInboxFilter, parseSearchQuery, SEARCH_ENGINE } from "./triage.ts";
+import {
+  HookInputError,
+  getHookConfig,
+  listDeliveries,
+  parseHookConfigBody,
+  publicDelivery,
+  publicHookConfig,
+  saveHookConfig,
+} from "./webhooks.ts";
 
 export async function handleApi(
   request: Request,
@@ -96,6 +105,23 @@ export async function handleApi(
       mailbox: publicMailbox(mailbox),
       attempts: attempts.map(publicAttempt),
     });
+  }
+
+  if (path === "/api/hooks") {
+    if (method === "GET") {
+      return getOwnerHooks(env, owner);
+    }
+    if (method === "POST") {
+      return saveOwnerHooks(request, env, owner);
+    }
+    return methodNotAllowed("GET, POST");
+  }
+
+  if (path === "/api/hooks/attempts") {
+    if (method !== "GET") {
+      return methodNotAllowed("GET");
+    }
+    return listOwnerDeliveries(env, owner, url);
   }
 
   if (path === "/api/mailboxes") {
@@ -769,6 +795,100 @@ async function createOwnedAddress(
     }
     throw error;
   }
+}
+
+async function getOwnerHooks(env: Env, owner: MailboxActor): Promise<Response> {
+  const mailbox = await getMailbox(env, owner.mailboxId);
+  if (!mailbox) {
+    return notFoundJson();
+  }
+  try {
+    const row = await getHookConfig(env, mailbox.id);
+    return json({
+      ok: true,
+      mailbox: publicMailbox(mailbox),
+      hook: row
+        ? publicHookConfig(row)
+        : publicHookConfig({
+            mailbox_id: mailbox.id,
+            webhook_enabled: 0,
+            webhook_url: null,
+            webhook_secret: null,
+            forward_enabled: 0,
+            forward_url: null,
+            forward_email: null,
+            updated_at: 0,
+          }),
+    });
+  } catch (error) {
+    return hookMigrateHint(error);
+  }
+}
+
+async function saveOwnerHooks(request: Request, env: Env, owner: MailboxActor): Promise<Response> {
+  const mailbox = await getMailbox(env, owner.mailboxId);
+  if (!mailbox) {
+    return notFoundJson();
+  }
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return json(
+      {
+        ok: false,
+        error: "invalid_request",
+        hint: 'Send JSON { "webhook_url", "webhook_secret" } and/or forward_url / forward_email.',
+      },
+      400,
+    );
+  }
+  try {
+    const input = parseHookConfigBody(body);
+    const saved = await saveHookConfig(env, mailbox.id, input);
+    return json({
+      ok: true,
+      mailbox: publicMailbox(mailbox),
+      hook: publicHookConfig(saved.row, saved.secretOnce ?? undefined),
+    });
+  } catch (error) {
+    if (error instanceof HookInputError) {
+      return json({ ok: false, error: error.error, hint: error.message }, 400);
+    }
+    return hookMigrateHint(error);
+  }
+}
+
+async function listOwnerDeliveries(env: Env, owner: MailboxActor, url: URL): Promise<Response> {
+  const mailbox = await getMailbox(env, owner.mailboxId);
+  if (!mailbox) {
+    return notFoundJson();
+  }
+  const rawLimit = Number(url.searchParams.get("limit") ?? "50");
+  const limit = Number.isFinite(rawLimit) ? rawLimit : 50;
+  try {
+    const deliveries = await listDeliveries(env, mailbox.id, limit);
+    return json({
+      ok: true,
+      mailbox: publicMailbox(mailbox),
+      deliveries: deliveries.map(publicDelivery),
+    });
+  } catch (error) {
+    return hookMigrateHint(error);
+  }
+}
+
+function hookMigrateHint(error: unknown): Response {
+  const detail = error instanceof Error ? error.message : "unknown";
+  return json(
+    {
+      ok: false,
+      error: "migrations_pending",
+      hint: "Apply D1 migrations (npm run db:migrate:local), then retry.",
+      detail,
+    },
+    503,
+  );
 }
 
 function publicMailbox(row: MailboxRecord) {

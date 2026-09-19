@@ -105,7 +105,15 @@ class MemoryStatement {
     const [a, b] = this.binds;
 
     if (sql.includes("from sqlite_master")) {
-      return ["mailboxes", "messages", "outbound_attempts", "api_tokens", "users"].map((name) => ({ name }));
+      return [
+        "mailboxes",
+        "messages",
+        "outbound_attempts",
+        "api_tokens",
+        "users",
+        "inbound_hooks",
+        "inbound_deliveries",
+      ].map((name) => ({ name }));
     }
     if (sql.includes("from users")) {
       let rows = this.db.users.slice();

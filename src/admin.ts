@@ -26,6 +26,16 @@ import {
   UserInputError,
   type UserRecord,
 } from "./users.ts";
+import {
+  HookInputError,
+  getHookConfig,
+  listDeliveries,
+  parseHookConfigBody,
+  publicDelivery,
+  publicHookConfig,
+  saveHookConfig,
+  type InboundDeliveryRecord,
+} from "./webhooks.ts";
 
 export async function handleAdmin(
   request: Request,
@@ -88,6 +98,23 @@ export async function handleAdmin(
       return methodNotAllowed("GET");
     }
     return listAdminMessages(env, url);
+  }
+
+  if (path === "/admin/hooks") {
+    if (method === "GET") {
+      return getAdminHooks(env, url);
+    }
+    if (method === "POST") {
+      return saveAdminHooks(request, env);
+    }
+    return methodNotAllowed("GET, POST");
+  }
+
+  if (path === "/admin/deliveries") {
+    if (method !== "GET") {
+      return methodNotAllowed("GET");
+    }
+    return listAdminDeliveries(env, url);
   }
 
   return notFoundJson();
@@ -349,6 +376,105 @@ async function patchAdminMailbox(request: Request, env: Env, mailboxId: string):
   return json({ ok: true, mailbox: publicMailbox(mailbox) });
 }
 
+async function getAdminHooks(env: Env, url: URL): Promise<Response> {
+  const mailboxId = url.searchParams.get("mailbox_id")?.trim() ?? "";
+  if (!mailboxId) {
+    return json(
+      { ok: false, error: "invalid_request", hint: "Pass mailbox_id to read inbound hook config." },
+      400,
+    );
+  }
+  try {
+    const mailbox = await getMailbox(env, mailboxId);
+    if (!mailbox) {
+      return notFoundJson();
+    }
+    const row = await getHookConfig(env, mailbox.id);
+    return json({
+      ok: true,
+      mailbox: publicMailbox(mailbox),
+      hook: row
+        ? publicHookConfig(row)
+        : publicHookConfig({
+            mailbox_id: mailbox.id,
+            webhook_enabled: 0,
+            webhook_url: null,
+            webhook_secret: null,
+            forward_enabled: 0,
+            forward_url: null,
+            forward_email: null,
+            updated_at: 0,
+          }),
+    });
+  } catch (error) {
+    return migrateHint(error);
+  }
+}
+
+async function saveAdminHooks(request: Request, env: Env): Promise<Response> {
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return json(
+      {
+        ok: false,
+        error: "invalid_request",
+        hint: 'Send JSON { "mailbox_id", "webhook_url" } (optional secret, forward_url, forward_email).',
+      },
+      400,
+    );
+  }
+  if (!body || typeof body !== "object") {
+    return json(
+      {
+        ok: false,
+        error: "invalid_request",
+        hint: 'Send JSON { "mailbox_id", "webhook_url" }.',
+      },
+      400,
+    );
+  }
+  const record = body as Record<string, unknown>;
+  const mailboxId = typeof record.mailbox_id === "string" ? record.mailbox_id.trim() : "";
+  if (!mailboxId) {
+    return json({ ok: false, error: "invalid_request", hint: "mailbox_id is required." }, 400);
+  }
+  try {
+    const mailbox = await getMailbox(env, mailboxId);
+    if (!mailbox) {
+      return notFoundJson();
+    }
+    const input = parseHookConfigBody(body);
+    const saved = await saveHookConfig(env, mailbox.id, input);
+    return json({
+      ok: true,
+      mailbox: publicMailbox(mailbox),
+      hook: publicHookConfig(saved.row, saved.secretOnce ?? undefined),
+    });
+  } catch (error) {
+    if (error instanceof HookInputError) {
+      return json({ ok: false, error: error.error, hint: error.message }, 400);
+    }
+    return migrateHint(error);
+  }
+}
+
+async function listAdminDeliveries(env: Env, url: URL): Promise<Response> {
+  const mailboxId = url.searchParams.get("mailbox_id")?.trim() || undefined;
+  const rawLimit = Number(url.searchParams.get("limit") ?? "50");
+  const limit = Number.isFinite(rawLimit) ? rawLimit : 50;
+  try {
+    const deliveries = await listDeliveries(env, mailboxId, limit);
+    return json({
+      ok: true,
+      deliveries: deliveries.map(publicDelivery),
+    });
+  } catch (error) {
+    return migrateHint(error);
+  }
+}
+
 async function listAdminMessages(env: Env, url: URL): Promise<Response> {
   const rawLimit = Number(url.searchParams.get("limit") ?? "50");
   const limit = Number.isFinite(rawLimit) ? Math.min(200, Math.max(1, Math.floor(rawLimit))) : 50;
@@ -409,8 +535,14 @@ async function renderAdminHome(request: Request, env: Env): Promise<Response> {
        ORDER BY received_at DESC, created_at DESC
        LIMIT 20`,
     ).all<MessageRecord>();
+    let deliveries: InboundDeliveryRecord[] = [];
+    try {
+      deliveries = await listDeliveries(env, undefined, 20);
+    } catch {
+      deliveries = [];
+    }
     return html(
-      renderAdminDashboard(users, boxes, usageById, mailRows.results ?? []),
+      renderAdminDashboard(users, boxes, usageById, mailRows.results ?? [], deliveries),
     );
   } catch (error) {
     return migrateHint(error);
@@ -505,6 +637,7 @@ function renderAdminDashboard(
   boxes: MailboxRecord[],
   usageById: Map<string, UserUsageSnapshot>,
   messages: MessageRecord[],
+  deliveries: InboundDeliveryRecord[],
 ): string {
   const userRows = users.length
     ? users
@@ -553,6 +686,22 @@ function renderAdminDashboard(
         .join("")
     : `<tr><td colspan="5">${emptyLine("林子里还没落下信件。")}</td></tr>`;
 
+  const deliveryRows = deliveries.length
+    ? deliveries
+        .map((row) => {
+          const status = row.status === "sent" ? "已送达" : `失败 · ${row.error || "downstream_failed"}`;
+          const note = row.hint || (row.http_status ? `HTTP ${row.http_status}` : "—");
+          return `<tr>
+            <td>${escapeHtml(formatReceived(row.created_at))}</td>
+            <td>${escapeHtml(row.kind === "webhook" ? "webhook" : "转发")}</td>
+            <td class="mono">${escapeHtml(row.target)}</td>
+            <td>${escapeHtml(status)}</td>
+            <td>${escapeHtml(note)}</td>
+          </tr>`;
+        })
+        .join("")
+    : `<tr><td colspan="5">${emptyLine("还没有入站投递。配好 webhook 或转发后，新信会记在这里。")}</td></tr>`;
+
   return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -578,7 +727,7 @@ function renderAdminDashboard(
             <button class="btn" type="submit">离开值守</button>
           </form>
         </div>
-        <p class="banner">小团队够用：成员、地址、配额。邮件列表只读，不在这里改信。0 表示不限额。</p>
+        <p class="banner">小团队够用：成员、地址、配额、入站投递。邮件列表只读，不在这里改信。0 表示不限额。Webhook 失败会出现在下面，不会被吞掉。</p>
 
         <section class="grove-panel">
           <h2>成员</h2>
@@ -622,6 +771,38 @@ function renderAdminDashboard(
             <button class="btn btn-primary" type="submit">开一个地址</button>
           </form>
           <p id="create-box-msg" class="banner" hidden></p>
+        </section>
+
+        <section class="grove-panel">
+          <h2>入站投递</h2>
+          <p class="banner">签名算法：HMAC-SHA256，签名串 <span class="mono">\${timestamp}.\${raw_json_body}</span>，头 <span class="mono">X-Postgrove-Signature: v1=&lt;hex&gt;</span>。内网 / 元数据 URL 会被拒绝。</p>
+          <div class="table-wrap">
+            <table class="grove-table">
+              <thead><tr><th>时间</th><th>种类</th><th>目标</th><th>状态</th><th>说明</th></tr></thead>
+              <tbody>${deliveryRows}</tbody>
+            </table>
+          </div>
+          <form id="save-hooks" class="grove-form">
+            <label>地址 ID <input class="search" name="mailbox_id" required placeholder="UUID"></label>
+            <label>Webhook URL <input class="search" name="webhook_url" placeholder="https://hooks.example.test/inbound"></label>
+            <label>签名密钥 <input class="search" name="webhook_secret" type="password" placeholder="留空则生成"></label>
+            <label>Webhook
+              <select name="webhook_enabled">
+                <option value="1">开启</option>
+                <option value="0">关闭</option>
+              </select>
+            </label>
+            <label>转发 URL <input class="search" name="forward_url" placeholder="https://chat.example.test/hook"></label>
+            <label>转发邮箱 <input class="search" name="forward_email" placeholder="neighbor@example.test"></label>
+            <label>转发
+              <select name="forward_enabled">
+                <option value="0">关闭</option>
+                <option value="1">开启</option>
+              </select>
+            </label>
+            <button class="btn btn-primary" type="submit">保存入站通知</button>
+          </form>
+          <p id="save-hooks-msg" class="banner" hidden></p>
         </section>
 
         <section class="grove-panel">
@@ -696,6 +877,32 @@ function renderAdminDashboard(
               setTimeout(function () { location.reload(); }, 800);
             })
             .catch(function () { show("create-box-msg", "请求失败。", true); });
+        });
+      }
+      var hookForm = document.getElementById("save-hooks");
+      if (hookForm) {
+        hookForm.addEventListener("submit", function (event) {
+          event.preventDefault();
+          var payload = readForm(hookForm);
+          if (payload.webhook_enabled !== undefined) payload.webhook_enabled = payload.webhook_enabled === "1" || payload.webhook_enabled === 1;
+          if (payload.forward_enabled !== undefined) payload.forward_enabled = payload.forward_enabled === "1" || payload.forward_enabled === 1;
+          fetch("/admin/hooks", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(payload)
+          }).then(function (res) { return res.json().then(function (body) { return { res: res, body: body }; }); })
+            .then(function (result) {
+              if (!result.res.ok) {
+                show("save-hooks-msg", result.body.hint || result.body.error, true);
+                return;
+              }
+              var secret = result.body.hook && result.body.hook.webhook_secret
+                ? " 签名密钥（只显示一次）：" + result.body.hook.webhook_secret
+                : "";
+              show("save-hooks-msg", "入站通知已保存。" + secret, false);
+              setTimeout(function () { location.reload(); }, 1200);
+            })
+            .catch(function () { show("save-hooks-msg", "请求失败。", true); });
         });
       }
       document.querySelectorAll("[data-user-status]").forEach(function (btn) {

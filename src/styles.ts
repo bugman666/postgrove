@@ -826,6 +826,17 @@ textarea:focus-visible {
   align-items: end;
 }
 
+.grove-form-stack {
+  grid-template-columns: 1fr;
+  align-items: stretch;
+}
+
+.grove-check {
+  flex-direction: row !important;
+  align-items: center;
+  gap: var(--pg-space-2);
+}
+
 .grove-form label {
   display: flex;
   flex-direction: column;
