@@ -1,8 +1,18 @@
 import type { Env } from "./env.ts";
+import { loadGroveStats, type GroveStats } from "./analytics.ts";
 import { requireAdmin } from "./auth.ts";
-import { html, json, methodNotAllowed, notFoundJson, quotaJson } from "./http.ts";
-import { EMPTY_ART, GROVE_MARK, escapeHtml, formatReceived } from "./html.ts";
+import {
+  BRAND_SAVED_HINT,
+  BrandingInputError,
+  loadBranding,
+  publicBranding,
+  saveBranding,
+} from "./branding.ts";
+import { html, json, methodNotAllowed, notFoundJson, quotaJson, redirect } from "./http.ts";
+import { EMPTY_ART, escapeHtml, formatReceived } from "./html.ts";
+import { resolveLocale } from "./i18n.ts";
 import { checkAddressQuota, userUsage, type UserUsageSnapshot } from "./quotas.ts";
+import { brandLink, documentLang, pageTitle, resolveShell, tr, type Shell } from "./view.ts";
 import {
   createMailbox,
   getMailbox,
@@ -45,16 +55,44 @@ export async function handleAdmin(
   const path = url.pathname;
   const method = request.method;
 
-  if (path === "/admin" || path === "/admin/") {
+  if (path === "/admin" || path === "/admin/" || path === "/admin/overview") {
     if (method !== "GET") {
       return methodNotAllowed("GET");
     }
-    return renderAdminHome(request, env);
+    return renderAdminHome(request, env, path.endsWith("/overview") ? "overview" : "desk");
+  }
+
+  if (path === "/admin/site") {
+    if (method === "GET") {
+      const saved = url.searchParams.get("saved") === "1";
+      return renderAdminSite(request, env, saved ? BRAND_SAVED_HINT : undefined, false);
+    }
+    if (method === "POST") {
+      return saveAdminSiteForm(request, env);
+    }
+    return methodNotAllowed("GET, POST");
   }
 
   const gate = await requireAdmin(request, env);
   if (!gate.ok) {
     return gate.response;
+  }
+
+  if (path === "/admin/stats") {
+    if (method !== "GET") {
+      return methodNotAllowed("GET");
+    }
+    return listAdminStats(env);
+  }
+
+  if (path === "/admin/branding") {
+    if (method === "GET") {
+      return listAdminBranding(env);
+    }
+    if (method === "POST") {
+      return patchAdminBranding(request, env);
+    }
+    return methodNotAllowed("GET, POST");
   }
 
   if (path === "/admin/users") {
@@ -118,6 +156,66 @@ export async function handleAdmin(
   }
 
   return notFoundJson();
+}
+
+async function listAdminStats(env: Env): Promise<Response> {
+  try {
+    const stats = await loadGroveStats(env);
+    return json({
+      ok: true,
+      stats: {
+        users: stats.users,
+        messages_today: stats.messages_today,
+        storage_mb: stats.storage_mb,
+      },
+    });
+  } catch (error) {
+    return migrateHint(error);
+  }
+}
+
+async function listAdminBranding(env: Env): Promise<Response> {
+  try {
+    const brand = await loadBranding(env);
+    return json({ ok: true, branding: publicBranding(brand) });
+  } catch (error) {
+    return migrateHint(error);
+  }
+}
+
+async function patchAdminBranding(request: Request, env: Env): Promise<Response> {
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return json(
+      {
+        ok: false,
+        error: "invalid_request",
+        hint: 'Send JSON { "site_title", "logo_url", "accent" }.',
+      },
+      400,
+    );
+  }
+  if (!body || typeof body !== "object") {
+    return json(
+      {
+        ok: false,
+        error: "invalid_request",
+        hint: 'Send JSON { "site_title", "logo_url", "accent" }.',
+      },
+      400,
+    );
+  }
+  try {
+    const saved = await saveBranding(env, body as Record<string, unknown>);
+    return json({ ok: true, branding: publicBranding(saved), hint: BRAND_SAVED_HINT });
+  } catch (error) {
+    if (error instanceof BrandingInputError) {
+      return json({ ok: false, error: error.error, hint: error.message }, 400);
+    }
+    return migrateHint(error);
+  }
 }
 
 async function listAdminUsers(env: Env): Promise<Response> {
@@ -333,7 +431,7 @@ async function createAdminMailbox(request: Request, env: Env): Promise<Response>
       if (!user) {
         return json({ ok: false, error: "not_found", hint: "Unknown user_id." }, 404);
       }
-      const quota = await checkAddressQuota(env, user);
+      const quota = await checkAddressQuota(env, user, resolveLocale(request));
       if (quota) {
         return quotaJson(quota.error, quota.hint, { used: quota.used, limit: quota.limit });
       }
@@ -508,20 +606,22 @@ async function listAdminMessages(env: Env, url: URL): Promise<Response> {
   }
 }
 
-async function renderAdminHome(request: Request, env: Env): Promise<Response> {
+async function renderAdminHome(
+  request: Request,
+  env: Env,
+  panel: "overview" | "desk",
+): Promise<Response> {
+  const shell = await resolveShell(request, env);
   const gate = await requireAdmin(request, env);
   if (!gate.ok) {
-    const status = gate.response.status;
-    if (status === 403) {
-      return html(renderAdminForbidden(), 403);
-    }
-    if (status === 503) {
-      return gate.response;
-    }
-    return html(renderAdminLogin(), 401);
+    return adminGatePage(shell, gate.response);
   }
 
   try {
+    const stats = await loadGroveStats(env);
+    if (panel === "overview") {
+      return html(renderAdminOverview(shell, stats));
+    }
     const users = await listUsers(env);
     const boxes = await listMailboxes(env);
     const usageById = new Map<string, UserUsageSnapshot>();
@@ -542,34 +642,74 @@ async function renderAdminHome(request: Request, env: Env): Promise<Response> {
       deliveries = [];
     }
     return html(
-      renderAdminDashboard(users, boxes, usageById, mailRows.results ?? [], deliveries),
+      renderAdminDashboard(shell, stats, users, boxes, usageById, mailRows.results ?? [], deliveries),
     );
   } catch (error) {
     return migrateHint(error);
   }
 }
 
-function renderAdminLogin(): string {
+async function renderAdminSite(request: Request, env: Env, notice?: string, danger = false): Promise<Response> {
+  const shell = await resolveShell(request, env);
+  const gate = await requireAdmin(request, env);
+  if (!gate.ok) {
+    return adminGatePage(shell, gate.response);
+  }
+  return html(renderAdminSitePage(shell, notice, danger));
+}
+
+async function saveAdminSiteForm(request: Request, env: Env): Promise<Response> {
+  const shell = await resolveShell(request, env);
+  const gate = await requireAdmin(request, env);
+  if (!gate.ok) {
+    return adminGatePage(shell, gate.response);
+  }
+  const data = await request.formData();
+  try {
+    await saveBranding(env, {
+      site_title: String(data.get("site_title") ?? ""),
+      logo_url: String(data.get("logo_url") ?? ""),
+      accent: String(data.get("accent") ?? ""),
+    });
+    return redirect("/admin/site?saved=1");
+  } catch (error) {
+    const hint = error instanceof BrandingInputError ? error.message : tr(shell, "banner.logo-fail");
+    return renderAdminSite(request, env, hint, true);
+  }
+}
+
+function adminGatePage(shell: Shell, response: Response): Response {
+  const status = response.status;
+  if (status === 403) {
+    return html(renderAdminForbidden(shell), 403);
+  }
+  if (status === 503) {
+    return response;
+  }
+  return html(renderAdminLogin(shell), 401);
+}
+
+function renderAdminLogin(shell: Shell): string {
   return `<!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="${documentLang(shell)}">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>值守 · Postgrove</title>
+  <title>${escapeHtml(pageTitle(shell, tr(shell, "heading.admin")))}</title>
   <link rel="stylesheet" href="/app.css">
 </head>
 <body class="mode-list">
   <main class="page">
     <div class="page-inner">
-      <a class="brand" href="/">${GROVE_MARK}Postgrove</a>
-      <div class="page-head"><h1>值守台</h1></div>
+      ${brandLink(shell, "/")}
+      <div class="page-head"><h1>${escapeHtml(tr(shell, "heading.admin"))}</h1></div>
       <div class="page-card">
-        <p class="banner">这里是小团队的值守入口，不是收件箱。用部署时的 ADMIN_TOKEN，或先以管理员成员登录。</p>
+        <p class="banner">${escapeHtml(tr(shell, "banner.admin-forbidden"))}</p>
         <form id="admin-login" class="login-form">
           <label>值守口令
             <input name="token" class="search" type="password" autocomplete="current-password" required>
           </label>
-          <button class="btn btn-primary" type="submit">进入值守</button>
+          <button class="btn btn-primary" type="submit">${escapeHtml(tr(shell, "brand.enter"))}</button>
           <p id="admin-login-error" class="banner danger" hidden></p>
         </form>
       </div>
@@ -608,23 +748,23 @@ function renderAdminLogin(): string {
 </html>`;
 }
 
-function renderAdminForbidden(): string {
+function renderAdminForbidden(shell: Shell): string {
   return `<!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="${documentLang(shell)}">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>无权值守 · Postgrove</title>
+  <title>${escapeHtml(pageTitle(shell, tr(shell, "heading.admin")))}</title>
   <link rel="stylesheet" href="/app.css">
 </head>
 <body class="mode-list">
   <main class="page">
     <div class="page-inner">
-      <a class="brand" href="/">${GROVE_MARK}Postgrove</a>
+      ${brandLink(shell, "/")}
       <div class="page-card">
-        <h1>普通成员进不了值守台</h1>
-        <p class="banner">这是管理员的只读审计和成员管理。用 ADMIN_TOKEN 走 /admin/session，或让值守把你的角色改成 admin。</p>
-        <p><a href="/">返回收件箱</a></p>
+        <h1>${escapeHtml(tr(shell, "heading.admin"))}</h1>
+        <p class="banner">${escapeHtml(tr(shell, "banner.admin-forbidden"))}</p>
+        <p><a href="/">${escapeHtml(tr(shell, "nav.inbox"))}</a></p>
       </div>
     </div>
   </main>
@@ -633,6 +773,8 @@ function renderAdminForbidden(): string {
 }
 
 function renderAdminDashboard(
+  shell: Shell,
+  stats: GroveStats,
   users: UserRecord[],
   boxes: MailboxRecord[],
   usageById: Map<string, UserUsageSnapshot>,
@@ -657,7 +799,7 @@ function renderAdminDashboard(
           </tr>`;
         })
         .join("")
-    : `<tr><td colspan="5">${emptyLine("还没有成员。下面开一个信箱用户。")}</td></tr>`;
+    : `<tr><td colspan="5">${emptyLine(tr(shell, "empty.members"))}</td></tr>`;
 
   const boxRows = boxes.length
     ? boxes
@@ -669,7 +811,7 @@ function renderAdminDashboard(
           </tr>`,
         )
         .join("")
-    : `<tr><td colspan="3">${emptyLine("还没有地址。")}</td></tr>`;
+    : `<tr><td colspan="3">${emptyLine(tr(shell, "empty.boxes"))}</td></tr>`;
 
   const mailRows = messages.length
     ? messages
@@ -684,7 +826,7 @@ function renderAdminDashboard(
           </tr>`;
         })
         .join("")
-    : `<tr><td colspan="5">${emptyLine("林子里还没落下信件。")}</td></tr>`;
+    : `<tr><td colspan="5">${emptyLine(tr(shell, "empty.mail"))}</td></tr>`;
 
   const deliveryRows = deliveries.length
     ? deliveries
@@ -700,33 +842,32 @@ function renderAdminDashboard(
           </tr>`;
         })
         .join("")
-    : `<tr><td colspan="5">${emptyLine("还没有入站投递。配好 webhook 或转发后，新信会记在这里。")}</td></tr>`;
+    : `<tr><td colspan="5">${emptyLine(tr(shell, "empty.deliveries"))}</td></tr>`;
 
   return `<!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="${documentLang(shell)}">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>值守台 · Postgrove</title>
+  <title>${escapeHtml(pageTitle(shell, tr(shell, "heading.admin")))}</title>
   <link rel="stylesheet" href="/app.css">
 </head>
 <body class="mode-list">
   <div class="shell simple">
     <aside class="nav">
-      <a class="brand" href="/">${GROVE_MARK}Postgrove</a>
-      <ul class="nav-list">
-        <li><a href="/">收件箱</a></li>
-        <li><a class="active" href="/admin">值守</a></li>
-      </ul>
+      ${brandLink(shell, "/")}
+      ${adminSideNav(shell, "desk")}
     </aside>
     <main class="page">
       <div class="page-inner page-inner-wide">
         <div class="page-head">
-          <h1>值守台</h1>
+          <h1>${escapeHtml(tr(shell, "heading.admin"))}</h1>
           <form id="admin-logout">
-            <button class="btn" type="submit">离开值守</button>
+            <button class="btn" type="submit">${escapeHtml(tr(shell, "brand.leave"))}</button>
           </form>
         </div>
+        ${adminSubnav(shell, "desk")}
+        ${renderStatCards(shell, stats)}
         <p class="banner">小团队够用：成员、地址、配额、入站投递。邮件列表只读，不在这里改信。0 表示不限额。Webhook 失败会出现在下面，不会被吞掉。</p>
 
         <section class="grove-panel">
@@ -927,6 +1068,148 @@ function renderAdminDashboard(
   </script>
 </body>
 </html>`;
+}
+
+function renderAdminOverview(shell: Shell, stats: GroveStats): string {
+  return `<!DOCTYPE html>
+<html lang="${documentLang(shell)}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>${escapeHtml(pageTitle(shell, tr(shell, "heading.overview")))}</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body class="mode-list">
+  <div class="shell simple">
+    <aside class="nav">
+      ${brandLink(shell, "/")}
+      ${adminSideNav(shell, "overview")}
+    </aside>
+    <main class="page">
+      <div class="page-inner page-inner-wide">
+        <div class="page-head">
+          <h1>${escapeHtml(tr(shell, "heading.overview"))}</h1>
+          <form id="admin-logout">
+            <button class="btn" type="submit">${escapeHtml(tr(shell, "brand.leave"))}</button>
+          </form>
+        </div>
+        ${adminSubnav(shell, "overview")}
+        ${renderStatCards(shell, stats)}
+      </div>
+    </main>
+  </div>
+  ${adminLogoutScript()}
+</body>
+</html>`;
+}
+
+function renderAdminSitePage(shell: Shell, notice?: string, danger = false): string {
+  const banner = notice
+    ? `<p class="banner ${danger ? "danger" : "success"}">${escapeHtml(notice)}</p>`
+    : "";
+  return `<!DOCTYPE html>
+<html lang="${documentLang(shell)}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>${escapeHtml(pageTitle(shell, tr(shell, "heading.site")))}</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body class="mode-list">
+  <div class="shell simple">
+    <aside class="nav">
+      ${brandLink(shell, "/")}
+      ${adminSideNav(shell, "site")}
+    </aside>
+    <main class="page">
+      <div class="page-inner">
+        <div class="page-head">
+          <h1>${escapeHtml(tr(shell, "heading.site"))}</h1>
+          <form id="admin-logout">
+            <button class="btn" type="submit">${escapeHtml(tr(shell, "brand.leave"))}</button>
+          </form>
+        </div>
+        ${adminSubnav(shell, "site")}
+        <div class="page-card">
+          ${banner}
+          <form class="grove-form grove-form-stack" method="post" action="/admin/site">
+            <label>${escapeHtml(tr(shell, "label.site-title"))}
+              <input class="search" name="site_title" maxlength="80" value="${escapeHtml(shell.brand.site_title)}">
+            </label>
+            <label>${escapeHtml(tr(shell, "label.logo-url"))}
+              <input class="search" name="logo_url" type="url" placeholder="https://example.test/logo.svg" value="${escapeHtml(shell.brand.logo_url ?? "")}">
+            </label>
+            <label>${escapeHtml(tr(shell, "label.accent"))}
+              <input class="search" name="accent" value="${escapeHtml(shell.brand.accent)}" placeholder="#1B4332">
+            </label>
+            <button class="btn btn-primary" type="submit">${escapeHtml(tr(shell, "label.save-brand"))}</button>
+          </form>
+        </div>
+      </div>
+    </main>
+  </div>
+  ${adminLogoutScript()}
+</body>
+</html>`;
+}
+
+function renderStatCards(shell: Shell, stats: GroveStats): string {
+  const empty = stats.empty
+    ? `<div class="empty">${EMPTY_ART}<p>${escapeHtml(tr(shell, "empty.analytics"))}</p></div>`
+    : "";
+  return `<section class="grove-panel">
+    <h2>${escapeHtml(tr(shell, "heading.overview"))}</h2>
+    ${empty}
+    <div class="stat-grid">
+      <article class="stat-card">
+        <span class="label">${escapeHtml(tr(shell, "stat.users"))}</span>
+        <div class="value">${stats.users}</div>
+      </article>
+      <article class="stat-card">
+        <span class="label">${escapeHtml(tr(shell, "stat.messages-today"))}</span>
+        <div class="value">${stats.messages_today}</div>
+      </article>
+      <article class="stat-card">
+        <span class="label">${escapeHtml(tr(shell, "stat.storage"))}</span>
+        <div class="value">${stats.storage_mb} MB</div>
+      </article>
+    </div>
+  </section>`;
+}
+
+function adminSideNav(shell: Shell, active: "overview" | "desk" | "site"): string {
+  return `<ul class="nav-list">
+        <li><a href="/">${escapeHtml(tr(shell, "nav.inbox"))}</a></li>
+        <li><a class="active" href="/admin">${escapeHtml(tr(shell, "nav.admin"))}</a></li>
+      </ul>
+      <ul class="nav-list nav-tools">
+        <li><a class="${active === "overview" ? "active" : ""}" href="/admin/overview">${escapeHtml(tr(shell, "nav.overview"))}</a></li>
+        <li><a class="${active === "desk" ? "active" : ""}" href="/admin">${escapeHtml(tr(shell, "nav.members"))}</a></li>
+        <li><a class="${active === "site" ? "active" : ""}" href="/admin/site">${escapeHtml(tr(shell, "nav.site"))}</a></li>
+      </ul>`;
+}
+
+function adminSubnav(shell: Shell, active: "overview" | "desk" | "site"): string {
+  return `<nav class="admin-subnav" aria-label="${escapeHtml(tr(shell, "heading.admin"))}">
+    <a class="filter${active === "overview" ? " active" : ""}" href="/admin/overview">${escapeHtml(tr(shell, "nav.overview"))}</a>
+    <a class="filter${active === "desk" ? " active" : ""}" href="/admin">${escapeHtml(tr(shell, "nav.members"))}</a>
+    <a class="filter${active === "site" ? " active" : ""}" href="/admin/site">${escapeHtml(tr(shell, "nav.site"))}</a>
+  </nav>`;
+}
+
+function adminLogoutScript(): string {
+  return `<script>
+    (function () {
+      var logout = document.getElementById("admin-logout");
+      if (!logout) return;
+      logout.addEventListener("submit", function (event) {
+        event.preventDefault();
+        fetch("/admin/logout", { method: "POST" }).finally(function () {
+          location.href = "/admin";
+        });
+      });
+    })();
+  </script>`;
 }
 
 function publicMailbox(row: MailboxRecord) {

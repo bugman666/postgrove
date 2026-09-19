@@ -1,5 +1,6 @@
 import type { Env } from "./env.ts";
 import { formatBytes } from "./attachment-limits.ts";
+import { t, type Locale } from "./i18n.ts";
 import type { UserRecord } from "./users.ts";
 
 export type QuotaKind = "quota_addresses" | "quota_storage" | "quota_send";
@@ -42,7 +43,11 @@ export async function userUsage(env: Env, userId: string, now = Date.now()): Pro
   };
 }
 
-export async function checkAddressQuota(env: Env, user: UserRecord): Promise<QuotaError | null> {
+export async function checkAddressQuota(
+  env: Env,
+  user: UserRecord,
+  locale: Locale = "zh",
+): Promise<QuotaError | null> {
   if (isUnlimited(user.quota_addresses)) {
     return null;
   }
@@ -50,7 +55,7 @@ export async function checkAddressQuota(env: Env, user: UserRecord): Promise<Quo
   if (used >= user.quota_addresses) {
     return {
       error: "quota_addresses",
-      hint: addressHint(used, user.quota_addresses),
+      hint: addressHint(used, user.quota_addresses, locale),
       used,
       limit: user.quota_addresses,
     };
@@ -62,6 +67,7 @@ export async function checkStorageQuota(
   env: Env,
   user: UserRecord,
   incomingBytes: number,
+  locale: Locale = "zh",
 ): Promise<QuotaError | null> {
   if (isUnlimited(user.quota_storage_bytes)) {
     return null;
@@ -71,7 +77,7 @@ export async function checkStorageQuota(
   if (next > user.quota_storage_bytes) {
     return {
       error: "quota_storage",
-      hint: storageHint(used, incomingBytes, user.quota_storage_bytes),
+      hint: storageHint(used, incomingBytes, user.quota_storage_bytes, locale),
       used,
       limit: user.quota_storage_bytes,
     };
@@ -83,6 +89,7 @@ export async function checkSendQuota(
   env: Env,
   user: UserRecord,
   now = Date.now(),
+  locale: Locale = "zh",
 ): Promise<QuotaError | null> {
   if (isUnlimited(user.quota_send_daily)) {
     return null;
@@ -92,7 +99,7 @@ export async function checkSendQuota(
   if (used >= user.quota_send_daily) {
     return {
       error: "quota_send",
-      hint: sendHint(used, user.quota_send_daily, day),
+      hint: sendHint(used, user.quota_send_daily, day, locale),
       used,
       limit: user.quota_send_daily,
     };
@@ -126,7 +133,7 @@ export async function inboundStorageRejection(
     if (next > row.quota_storage_bytes) {
       return {
         error: "quota_storage",
-        hint: storageHint(used, incomingBytes, row.quota_storage_bytes),
+        hint: storageHint(used, incomingBytes, row.quota_storage_bytes, "zh"),
         used,
         limit: row.quota_storage_bytes,
       };
@@ -178,14 +185,32 @@ export async function sendCountForDay(env: Env, userId: string, day: string): Pr
   return Number(row?.count ?? 0);
 }
 
-function addressHint(used: number, limit: number): string {
+function addressHint(used: number, limit: number, locale: Locale = "zh"): string {
+  if (locale === "en") {
+    return t("en", "quota.addresses-full", { used, limit });
+  }
   return `地址配额已满（已用 ${used} / 上限 ${limit}）。向值守申请提高配额，或停用一个旧地址后再开新的。`;
 }
 
-function storageHint(used: number, incoming: number, limit: number): string {
+function storageHint(
+  used: number,
+  incoming: number,
+  limit: number,
+  locale: Locale = "zh",
+): string {
+  if (locale === "en") {
+    return t("en", "quota.storage-used", {
+      used: formatBytes(used),
+      incoming: formatBytes(incoming),
+      limit: formatBytes(limit),
+    });
+  }
   return `存储配额不足（已用 ${formatBytes(used)}，本封 ${formatBytes(incoming)}，上限 ${formatBytes(limit)}）。清一清旧信或提高该成员的存储配额。`;
 }
 
-function sendHint(used: number, limit: number, day: string): string {
+function sendHint(used: number, limit: number, day: string, locale: Locale = "zh"): string {
+  if (locale === "en") {
+    return t("en", "quota.send-used", { used, limit, day });
+  }
   return `今日发送配额已用完（${used} / ${limit}，UTC ${day}）。明天零点（UTC）重置，或向值守申请提高日发送上限。`;
 }

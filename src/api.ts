@@ -8,6 +8,7 @@ import {
   publicFolderList,
 } from "./folders.ts";
 import { forbiddenJson, json, methodNotAllowed, notFoundJson, quotaJson } from "./http.ts";
+import { parseLocalePreference, resolveLocale, t, withLocaleCookie } from "./i18n.ts";
 import { buildComposePrefill, parseComposeMode } from "./reply.ts";
 import { checkAddressQuota } from "./quotas.ts";
 import { parseSendFields, sendOutbound } from "./send.ts";
@@ -71,6 +72,13 @@ export async function handleApi(
   const tokens = await handleOwnerTokenRoutes(request, env, url, owner);
   if (tokens) {
     return tokens;
+  }
+
+  if (path === "/api/locale") {
+    if (method !== "POST") {
+      return methodNotAllowed("POST");
+    }
+    return setOwnerLocale(request);
   }
 
   if (path === "/api/addresses") {
@@ -736,6 +744,23 @@ async function visibleMailboxes(env: Env, owner: MailboxActor): Promise<MailboxR
   return mailbox ? [mailbox] : [];
 }
 
+async function setOwnerLocale(request: Request): Promise<Response> {
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return json(
+      { ok: false, error: "invalid_request", hint: 'Send JSON { "locale": "zh"|"en"|"auto" }.' },
+      400,
+    );
+  }
+  const record = body && typeof body === "object" ? (body as Record<string, unknown>) : {};
+  const preference = parseLocalePreference(record.locale);
+  const locale = preference === "auto" ? resolveLocale(request) : preference;
+  const hint = t(locale, "banner.lang-updated");
+  return withLocaleCookie(json({ ok: true, locale: preference === "auto" ? "auto" : locale, hint }), request, preference);
+}
+
 async function createOwnedAddress(
   request: Request,
   env: Env,
@@ -774,7 +799,7 @@ async function createOwnedAddress(
     if (!user) {
       return notFoundJson();
     }
-    const quota = await checkAddressQuota(env, user);
+    const quota = await checkAddressQuota(env, user, resolveLocale(request));
     if (quota) {
       return quotaJson(quota.error, quota.hint, { used: quota.used, limit: quota.limit });
     }

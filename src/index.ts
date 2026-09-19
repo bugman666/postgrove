@@ -3,6 +3,7 @@ import { handleApi } from "./api";
 import { ATTACHMENT_CSS, handleAttachmentRoutes } from "./attachments";
 import { handleAdmin } from "./admin.ts";
 import { handleAuthRoutes } from "./auth";
+import { brandOverrideCss, loadBranding } from "./branding.ts";
 import { handleHealth } from "./health";
 import { css } from "./http";
 import { handleInbound } from "./inbound";
@@ -21,7 +22,8 @@ export default {
     }
 
     if (request.method === "GET" && url.pathname === "/app.css") {
-      return css(APP_CSS + ATTACHMENT_CSS);
+      const brand = await loadBranding(env);
+      return css(APP_CSS + ATTACHMENT_CSS + brandOverrideCss(brand.accent));
     }
 
     const auth = await handleAuthRoutes(request, env);

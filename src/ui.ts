@@ -1,30 +1,36 @@
-import type { Env } from "./env";
+import type { Env } from "./env.ts";
 import {
   listMessageAttachments,
   renderAttachmentsHtml,
   type AttachmentRecord,
-} from "./attachments";
-import { actorUserId, requireOwner, type MailboxActor } from "./auth";
+} from "./attachments.ts";
+import { actorUserId, requireOwner, type MailboxActor } from "./auth.ts";
 import {
-  FOLDER_EMPTY,
   FOLDER_LABELS,
   SYSTEM_FOLDERS,
   folderNavLinks,
   parseDraftFields,
   parseFolder,
   type SystemFolder,
-} from "./folders";
-import { html, redirect } from "./http";
-import { EMPTY_ART, GROVE_MARK, escapeHtml, formatReceived } from "./html";
-import { describeOutbound } from "./outbound";
+} from "./folders.ts";
+import { html, redirect } from "./http.ts";
+import { EMPTY_ART, escapeHtml, formatReceived } from "./html.ts";
+import {
+  folderEmptyKey,
+  folderLabelKey,
+  parseLocalePreference,
+  withLocaleCookie,
+} from "./i18n.ts";
+import { checkAddressQuota } from "./quotas.ts";
+import { describeOutbound } from "./outbound.ts";
 import {
   buildComposePrefill,
   composeHeading,
   parseComposeMode,
   type ComposeMode,
   type ComposePrefill,
-} from "./reply";
-import { parseSendFields, sendOutbound } from "./send";
+} from "./reply.ts";
+import { parseSendFields, sendOutbound } from "./send.ts";
 import {
   countUnreadInbox,
   createMailbox,
@@ -47,9 +53,16 @@ import {
   type MailboxRecord,
   type MessageRecord,
   type OutboundAttemptRecord,
-} from "./store";
-import { checkAddressQuota } from "./quotas.ts";
+} from "./store.ts";
 import { bindUserMailbox, getUser, mailboxAllowed } from "./users.ts";
+import {
+  brandLink,
+  documentLang,
+  pageTitle,
+  resolveShell,
+  tr,
+  type Shell,
+} from "./view.ts";
 import {
   findThreadById,
   findThreadForMessage,
@@ -57,8 +70,8 @@ import {
   latestThreadMessage,
   threadHasUnread,
   type MessageThread,
-} from "./threads";
-import { parseInboxFilter, parseSearchQuery, type InboxFilter } from "./triage";
+} from "./threads.ts";
+import { parseInboxFilter, parseSearchQuery, type InboxFilter } from "./triage.ts";
 import {
   HookInputError,
   getHookConfig,
@@ -68,7 +81,7 @@ import {
   saveHookConfig,
   type InboundDeliveryRecord,
   type PublicHookConfig,
-} from "./webhooks";
+} from "./webhooks.ts";
 
 type NavId = SystemFolder | "unread" | "compose" | "addresses" | "settings" | "admin";
 
@@ -87,9 +100,10 @@ export async function handleUi(
   env: Env,
   url: URL,
 ): Promise<Response> {
+  const shell = await resolveShell(request, env);
   const gate = await requireOwner(request, env);
   if (!gate.ok) {
-    return unauthorizedPage(gate.response);
+    return unauthorizedPage(shell, gate.response);
   }
 
   const owner: MailboxActor = gate.principal;
@@ -100,53 +114,62 @@ export async function handleUi(
 
   if (path === "/") {
     if (method !== "GET") {
-      return pageMethodNotAllowed();
+      return pageMethodNotAllowed(shell);
     }
     if (!ownMailbox) {
-      return html(renderAddressesPage([], "inbox", unreadCount), 200);
+      return html(renderAddressesPage(shell, [], "inbox", unreadCount), 200);
     }
     return redirect(boxPath(ownMailbox.id));
   }
 
   if (path === "/compose") {
     if (method === "POST") {
-      return handleComposeSubmit(request, env, url, owner, ownMailbox, unreadCount);
+      return handleComposeSubmit(request, env, url, owner, ownMailbox, unreadCount, shell);
     }
     if (method !== "GET") {
-      return pageMethodNotAllowed();
+      return pageMethodNotAllowed(shell);
     }
-    return renderCompose(env, url, ownMailbox, unreadCount);
+    return renderCompose(env, url, ownMailbox, unreadCount, shell);
   }
 
   if (path === "/addresses") {
     if (method === "POST") {
-      return handleAddressCreate(request, env, owner, unreadCount);
+      return handleAddressCreate(request, env, owner, unreadCount, shell);
     }
     if (method !== "GET") {
-      return pageMethodNotAllowed();
+      return pageMethodNotAllowed(shell);
     }
     const boxes = await visibleUiMailboxes(env, owner, ownMailbox);
-    return html(renderAddressesPage(boxes, "addresses", unreadCount, url.searchParams.get("error")));
+    return html(renderAddressesPage(shell, boxes, "addresses", unreadCount, url.searchParams.get("error")));
   }
 
   if (path === "/settings") {
     if (method === "POST") {
-      return handleSettingsSave(request, env, owner, ownMailbox, unreadCount);
+      return handleSettingsSave(request, env, owner, ownMailbox, unreadCount, shell);
     }
     if (method !== "GET") {
-      return pageMethodNotAllowed();
+      return pageMethodNotAllowed(shell);
     }
-    return renderSettings(env, owner, ownMailbox, unreadCount, url.searchParams.get("error"), url.searchParams.get("saved"));
+    return renderSettings(
+      env,
+      owner,
+      ownMailbox,
+      unreadCount,
+      shell,
+      url.searchParams.get("error"),
+      url.searchParams.get("saved"),
+      url.searchParams.get("lang"),
+    );
   }
 
   const moveMatch = path.match(/^\/box\/([^/]+)\/m\/([^/]+)\/move$/);
   if (moveMatch) {
     if (method !== "POST") {
-      return pageMethodNotAllowed();
+      return pageMethodNotAllowed(shell);
     }
     const mailbox = await allowedMailbox(env, owner, decodeURIComponent(moveMatch[1]));
     if (!mailbox) {
-      return forbiddenOrMissing(ownMailbox, unreadCount);
+      return forbiddenOrMissing(shell, ownMailbox, unreadCount);
     }
     const messageId = decodeURIComponent(moveMatch[2]);
     const data = await request.formData();
@@ -158,11 +181,11 @@ export async function handleUi(
   const deleteMatch = path.match(/^\/box\/([^/]+)\/m\/([^/]+)\/delete$/);
   if (deleteMatch) {
     if (method !== "POST") {
-      return pageMethodNotAllowed();
+      return pageMethodNotAllowed(shell);
     }
     const mailbox = await allowedMailbox(env, owner, decodeURIComponent(deleteMatch[1]));
     if (!mailbox) {
-      return forbiddenOrMissing(ownMailbox, unreadCount);
+      return forbiddenOrMissing(shell, ownMailbox, unreadCount);
     }
     const messageId = decodeURIComponent(deleteMatch[2]);
     await trashMessage(env, mailbox.id, messageId);
@@ -172,11 +195,11 @@ export async function handleUi(
   const starMatch = path.match(/^\/box\/([^/]+)\/m\/([^/]+)\/star$/);
   if (starMatch) {
     if (method !== "POST") {
-      return pageMethodNotAllowed();
+      return pageMethodNotAllowed(shell);
     }
     const mailbox = await allowedMailbox(env, owner, decodeURIComponent(starMatch[1]));
     if (!mailbox) {
-      return forbiddenOrMissing(ownMailbox, unreadCount);
+      return forbiddenOrMissing(shell, ownMailbox, unreadCount);
     }
     const messageId = decodeURIComponent(starMatch[2]);
     const data = await request.formData();
@@ -188,11 +211,11 @@ export async function handleUi(
   const flagMatch = path.match(/^\/box\/([^/]+)\/m\/([^/]+)\/read$/);
   if (flagMatch) {
     if (method !== "POST") {
-      return pageMethodNotAllowed();
+      return pageMethodNotAllowed(shell);
     }
     const mailbox = await allowedMailbox(env, owner, decodeURIComponent(flagMatch[1]));
     if (!mailbox) {
-      return forbiddenOrMissing(ownMailbox, unreadCount);
+      return forbiddenOrMissing(shell, ownMailbox, unreadCount);
     }
     const messageId = decodeURIComponent(flagMatch[2]);
     const data = await request.formData();
@@ -207,18 +230,18 @@ export async function handleUi(
   const threadMatch = path.match(/^\/box\/([^/]+)\/t\/([^/]+)$/);
   if (threadMatch) {
     if (method !== "GET") {
-      return pageMethodNotAllowed();
+      return pageMethodNotAllowed(shell);
     }
     const mailbox = await allowedMailbox(env, owner, decodeURIComponent(threadMatch[1]));
     if (!mailbox) {
-      return forbiddenOrMissing(ownMailbox, unreadCount);
+      return forbiddenOrMissing(shell, ownMailbox, unreadCount);
     }
     const threadId = decodeURIComponent(threadMatch[2]);
     const view = readInboxView(url);
     const listed = await listInboxMessages(env, mailbox.id, view);
     const visible = findThreadById(groupMessagesIntoThreads(listed), threadId);
     if (!visible) {
-      return html(renderNotFound(mailbox, unreadCount), 404);
+      return html(renderNotFound(shell, mailbox, unreadCount), 404);
     }
     const allInbox = await listInboxMessages(env, mailbox.id, {});
     const thread = findThreadById(groupMessagesIntoThreads(allInbox), threadId) ?? visible;
@@ -236,6 +259,7 @@ export async function handleUi(
       attachments,
       thread: opened,
       unreadCount,
+      shell,
       ...view,
     }));
   }
@@ -243,16 +267,16 @@ export async function handleUi(
   const readMatch = path.match(/^\/box\/([^/]+)\/m\/([^/]+)$/);
   if (readMatch) {
     if (method !== "GET") {
-      return pageMethodNotAllowed();
+      return pageMethodNotAllowed(shell);
     }
     const mailbox = await allowedMailbox(env, owner, decodeURIComponent(readMatch[1]));
     if (!mailbox) {
-      return forbiddenOrMissing(ownMailbox, unreadCount);
+      return forbiddenOrMissing(shell, ownMailbox, unreadCount);
     }
     const messageId = decodeURIComponent(readMatch[2]);
     const existing = await getMailboxMessage(env, mailbox.id, messageId);
     if (!existing) {
-      return html(renderNotFound(mailbox, unreadCount), 404);
+      return html(renderNotFound(shell, mailbox, unreadCount), 404);
     }
     if (existing.folder === "draft") {
       return redirect(composeHref(mailbox, "new", undefined, existing.id));
@@ -289,23 +313,25 @@ export async function handleUi(
         attachments,
         thread: openedThread,
         unreadCount,
+        shell,
         ...view,
       }));
     }
     return html(renderFolderPage(mailbox, folder, messages, message, {
       attachments,
       unreadCount,
+      shell,
     }));
   }
 
   const boxMatch = path.match(/^\/box\/([^/]+)$/);
   if (boxMatch) {
     if (method !== "GET") {
-      return pageMethodNotAllowed();
+      return pageMethodNotAllowed(shell);
     }
     const mailbox = await allowedMailbox(env, owner, decodeURIComponent(boxMatch[1]));
     if (!mailbox) {
-      return forbiddenOrMissing(ownMailbox, unreadCount);
+      return forbiddenOrMissing(shell, ownMailbox, unreadCount);
     }
     const folder = parseFolder(url.searchParams.get("folder"));
     const view = readInboxView(url);
@@ -316,6 +342,7 @@ export async function handleUi(
           deleted: url.searchParams.get("deleted") === "1",
           markedUnread: url.searchParams.get("unread") === "1",
           unreadCount,
+          shell,
           ...view,
         }),
       );
@@ -332,11 +359,12 @@ export async function handleUi(
         moved: url.searchParams.get("moved") === "1",
         justSent: Boolean(sentId),
         unreadCount,
+        shell,
       }),
     );
   }
 
-  return html(renderNotFound(undefined, unreadCount), 404);
+  return html(renderNotFound(shell, undefined, unreadCount), 404);
 }
 
 async function allowedMailbox(
@@ -370,6 +398,7 @@ async function handleAddressCreate(
   env: Env,
   owner: MailboxActor,
   unreadCount: number,
+  shell: Shell,
 ): Promise<Response> {
   const boxes = await visibleUiMailboxes(env, owner, await getMailbox(env, owner.mailboxId));
   const data = await request.formData();
@@ -379,9 +408,9 @@ async function handleAddressCreate(
   if (userId) {
     const user = await getUser(env, userId);
     if (user) {
-      const quota = await checkAddressQuota(env, user);
+      const quota = await checkAddressQuota(env, user, shell.locale);
       if (quota) {
-        return html(renderAddressesPage(boxes, "addresses", unreadCount, quota.hint), 409);
+        return html(renderAddressesPage(shell, boxes, "addresses", unreadCount, quota.hint), 409);
       }
     }
   }
@@ -393,7 +422,7 @@ async function handleAddressCreate(
     return redirect(`/addresses?created=1`);
   } catch (error) {
     const hint = error instanceof MailboxInputError ? error.message : "没能开这个地址。";
-    return html(renderAddressesPage(boxes, "addresses", unreadCount, hint), 400);
+    return html(renderAddressesPage(shell, boxes, "addresses", unreadCount, hint), 400);
   }
 }
 
@@ -403,11 +432,16 @@ async function handleSettingsSave(
   owner: MailboxActor,
   ownMailbox: MailboxRecord | null,
   unreadCount: number,
+  shell: Shell,
 ): Promise<Response> {
-  if (!ownMailbox) {
-    return renderSettings(env, owner, ownMailbox, unreadCount, "没有当前地址，先登录一个信箱。");
-  }
   const data = await request.formData();
+  if (stringField(data.get("intent")) === "locale") {
+    const preference = parseLocalePreference(stringField(data.get("locale")));
+    return withLocaleCookie(redirect("/settings?lang=1"), request, preference);
+  }
+  if (!ownMailbox) {
+    return renderSettings(env, owner, ownMailbox, unreadCount, shell, "没有当前地址，先登录一个信箱。");
+  }
   const body = {
     webhook_enabled: stringField(data.get("webhook_enabled")) === "1",
     webhook_url: stringField(data.get("webhook_url")),
@@ -423,7 +457,7 @@ async function handleSettingsSave(
     return redirect("/settings?saved=1");
   } catch (error) {
     const hint = error instanceof HookInputError ? error.message : "没能保存入站通知。";
-    return renderSettings(env, owner, ownMailbox, unreadCount, hint);
+    return renderSettings(env, owner, ownMailbox, unreadCount, shell, hint);
   }
 }
 
@@ -432,8 +466,10 @@ async function renderSettings(
   owner: MailboxActor,
   mailbox: MailboxRecord | null,
   unreadCount: number,
+  shell: Shell,
   error: string | null = null,
   saved: string | null = null,
+  lang: string | null = null,
 ): Promise<Response> {
   let hook: PublicHookConfig | null = null;
   let deliveries: InboundDeliveryRecord[] = [];
@@ -458,10 +494,13 @@ async function renderSettings(
     }
   }
   const status = error ? 400 : 200;
-  return html(renderSettingsPage(owner, mailbox, hook, deliveries, unreadCount, error, saved === "1"), status);
+  return html(
+    renderSettingsPage(owner, mailbox, hook, deliveries, unreadCount, shell, error, saved === "1", lang === "1"),
+    status,
+  );
 }
 
-async function unauthorizedPage(authResponse: Response): Promise<Response> {
+async function unauthorizedPage(shell: Shell, authResponse: Response): Promise<Response> {
   let hint = "POST /auth/login with address and token, then send the session cookie.";
   let error = "unauthorized";
   try {
@@ -478,11 +517,11 @@ async function unauthorizedPage(authResponse: Response): Promise<Response> {
   } catch {
     // Keep the auth-module default hint.
   }
-  return html(renderLoginPage(error, hint), authResponse.status);
+  return html(renderLoginPage(shell, error, hint), authResponse.status);
 }
 
-function forbiddenOrMissing(ownMailbox: MailboxRecord | null, unreadCount = 0): Response {
-  return html(renderForbidden(ownMailbox, unreadCount), ownMailbox ? 403 : 404);
+function forbiddenOrMissing(shell: Shell, ownMailbox: MailboxRecord | null, unreadCount = 0): Response {
+  return html(renderForbidden(shell, ownMailbox, unreadCount), ownMailbox ? 403 : 404);
 }
 
 async function handleComposeSubmit(
@@ -492,6 +531,7 @@ async function handleComposeSubmit(
   owner: MailboxActor,
   ownMailbox: MailboxRecord | null,
   unreadCount: number,
+  shell: Shell,
 ): Promise<Response> {
   if (!ownMailbox) {
     return html(
@@ -500,12 +540,13 @@ async function handleComposeSubmit(
         formError: "没有可用地址。先确认本地已经 migrate 并且 seed，再 POST /auth/login。",
         attempts: [],
         unreadCount,
+        shell,
       }),
       404,
     );
   }
   if (!mailboxAllowed(owner, ownMailbox)) {
-    return forbiddenOrMissing(ownMailbox, unreadCount);
+    return forbiddenOrMissing(shell, ownMailbox, unreadCount);
   }
 
   let form: ComposeForm;
@@ -522,6 +563,7 @@ async function handleComposeSubmit(
           formError: "Send JSON { \"to\", \"subject\", \"text\" } or a form post.",
           attempts: await listOutboundAttempts(env, ownMailbox.id),
           unreadCount,
+          shell,
         }),
         400,
       );
@@ -542,7 +584,7 @@ async function handleComposeSubmit(
       draftId: typeof record.draft_id === "string" ? record.draft_id : typeof record.draftId === "string" ? record.draftId : "",
     };
     if (record.intent === "save" || record.save === true) {
-      return saveComposeDraft(env, url, ownMailbox, form, unreadCount);
+      return saveComposeDraft(env, url, ownMailbox, form, unreadCount, shell);
     }
   } else {
     const data = await request.formData();
@@ -556,7 +598,7 @@ async function handleComposeSubmit(
       draftId: stringField(data.get("draft_id")),
     };
     if (stringField(data.get("intent")) === "save") {
-      return saveComposeDraft(env, url, ownMailbox, form, unreadCount);
+      return saveComposeDraft(env, url, ownMailbox, form, unreadCount, shell);
     }
   }
 
@@ -575,6 +617,7 @@ async function handleComposeSubmit(
         formError: parsed.hint,
         attempts: await listOutboundAttempts(env, ownMailbox.id),
         unreadCount,
+        shell,
       }),
       400,
     );
@@ -603,6 +646,7 @@ async function saveComposeDraft(
   mailbox: MailboxRecord,
   form: ComposeForm,
   unreadCount: number,
+  shell: Shell,
 ): Promise<Response> {
   const parsed = parseDraftFields({
     to: form.to,
@@ -619,6 +663,7 @@ async function saveComposeDraft(
         formError: parsed.hint,
         attempts: await listOutboundAttempts(env, mailbox.id),
         unreadCount,
+        shell,
       }),
       400,
     );
@@ -633,6 +678,7 @@ async function saveComposeDraft(
         formError: "找不到这封草稿。回到草稿箱再试一次。",
         attempts: await listOutboundAttempts(env, mailbox.id),
         unreadCount,
+        shell,
       }),
       404,
     );
@@ -647,6 +693,7 @@ async function renderCompose(
   url: URL,
   mailbox: MailboxRecord | null,
   unreadCount: number,
+  shell: Shell,
 ): Promise<Response> {
   const attempts = mailbox ? await listOutboundAttempts(env, mailbox.id) : [];
   const attemptId = url.searchParams.get("attempt");
@@ -687,6 +734,7 @@ async function renderCompose(
       mode: prefill?.mode ?? (highlighted ? "new" : mode),
       unreadCount,
       savedDraft,
+      shell,
     }),
   );
 }
@@ -723,8 +771,8 @@ function formFromDraft(row: MessageRecord): ComposeForm {
   };
 }
 
-function pageMethodNotAllowed(): Response {
-  return html(renderNotFound(), 405);
+function pageMethodNotAllowed(shell: Shell): Response {
+  return html(renderNotFound(shell), 405);
 }
 
 function boxPath(mailboxId: string, folder: SystemFolder = "inbox"): string {
@@ -875,16 +923,24 @@ function renderInboxPage(
     unreadCount: number;
     q: string;
     filter: InboxFilter;
+    shell: Shell;
   },
 ): string {
   const q = flags.q;
   const filter = flags.filter;
+  const shell = flags.shell;
   const heading =
-    filter === "unread" ? "未读" : filter === "starred" ? "星标" : q ? "搜索" : "收件箱";
+    filter === "unread"
+      ? tr(shell, "nav.unread")
+      : filter === "starred"
+        ? tr(shell, "nav.starred")
+        : q
+          ? tr(shell, "heading.search")
+          : tr(shell, "nav.inbox");
   const threads = groupMessagesIntoThreads(messages);
   const selectedThread = flags.thread
     ?? (selected ? findThreadForMessage(threads, selected.id) : null);
-  const emptyCopy = emptyInboxCopy(messages.length, q, filter);
+  const emptyCopy = emptyInboxCopy(shell, messages.length, q, filter);
   const list = messages.length === 0
     ? emptyBlock(emptyCopy)
     : `<ul class="msg-list">${threads.map((thread) => threadRow(mailbox, thread, selectedThread?.id, q, filter)).join("")}</ul>`;
@@ -910,33 +966,39 @@ function renderInboxPage(
   } else {
     const banners: string[] = [];
     if (flags.deleted) {
-      banners.push(`<p class="banner">已移出收件箱。</p>`);
+      banners.push(`<p class="banner">${escapeHtml(tr(shell, "banner.deleted-inbox"))}</p>`);
     }
     if (flags.markedUnread) {
-      banners.push(`<p class="banner">已标为未读。</p>`);
+      banners.push(`<p class="banner">${escapeHtml(tr(shell, "banner.marked-unread"))}</p>`);
     }
-    reading = `${banners.join("")}<div class="read-inner"><p class="empty">从左侧选一封，或点「写信」。</p></div>`;
+    reading = `${banners.join("")}<div class="read-inner"><p class="empty">${escapeHtml(tr(shell, "empty.pick"))}</p></div>`;
   }
 
   const chips = (["all", "unread", "starred"] as const)
     .map((id) => {
-      const label = id === "all" ? "全部" : id === "unread" ? "未读" : "星标";
+      const label =
+        id === "all"
+          ? tr(shell, "filter.all")
+          : id === "unread"
+            ? tr(shell, "filter.unread")
+            : tr(shell, "filter.starred");
       const active = filter === id ? " active" : "";
-      return `<a class="filter${active}" href="${escapeHtml(viewHref(mailbox, q, id))}">${label}</a>`;
+      return `<a class="filter${active}" href="${escapeHtml(viewHref(mailbox, q, id))}">${escapeHtml(label)}</a>`;
     })
     .join("");
 
   return layout({
-    title: selected?.subject ? `${selected.subject} · Postgrove` : `${heading} · Postgrove`,
+    title: selected?.subject ? pageTitle(shell, selected.subject) : pageTitle(shell, heading),
     nav: filter === "unread" ? "unread" : "inbox",
     mailbox,
     mode: selected ? "read" : "list",
     simple: false,
     unreadCount: flags.unreadCount,
+    shell,
     body: `<section class="list">
       <div class="list-head">
         <h1>${escapeHtml(heading)}</h1>
-        ${folderStrip(mailbox, "inbox")}
+        ${folderStrip(shell, mailbox, "inbox")}
         <form class="search-form" method="get" action="${escapeHtml(boxPath(mailbox.id))}">
           <input class="search" type="search" name="q" value="${escapeHtml(q)}" placeholder="搜索发件人、主题或正文" maxlength="200">
           ${filter !== "all" ? `<input type="hidden" name="filter" value="${escapeHtml(filter)}">` : ""}
@@ -960,44 +1022,47 @@ function renderFolderPage(
     justSent?: boolean;
     attachments?: AttachmentRecord[];
     unreadCount: number;
+    shell: Shell;
   },
 ): string {
-  const label = FOLDER_LABELS[folder];
+  const shell = flags.shell;
+  const label = tr(shell, folderLabelKey(folder));
   const list = messages.length === 0
-    ? emptyBlock(FOLDER_EMPTY[folder])
+    ? emptyBlock(tr(shell, folderEmptyKey(folder)))
     : `<ul class="msg-list">${messages.map((row) => folderMessageRow(mailbox, folder, row, selected?.id)).join("")}</ul>`;
 
   let reading: string;
   if (selected) {
     const sentBanner = flags.justSent
-      ? `<p class="banner success">发送成功。这封信现在在已发送。</p>`
+      ? `<p class="banner success">${escapeHtml(tr(shell, "banner.sent-ok"))}</p>`
       : "";
     reading = `${sentBanner}${renderReading(mailbox, selected, flags.attachments ?? [], "", "all", folder)}`;
   } else {
     const banners: string[] = [];
     if (flags.deleted) {
-      banners.push(`<p class="banner">已移入垃圾箱。</p>`);
+      banners.push(`<p class="banner">${escapeHtml(tr(shell, "banner.deleted-trash"))}</p>`);
     }
     if (flags.moved) {
-      banners.push(`<p class="banner">已移动到${escapeHtml(label)}。</p>`);
+      banners.push(`<p class="banner">${escapeHtml(tr(shell, "banner.moved", { folder: label }))}</p>`);
     }
     if (flags.justSent) {
-      banners.push(`<p class="banner success">已记下这次发送，可在已发送里打开。</p>`);
+      banners.push(`<p class="banner success">${escapeHtml(tr(shell, "banner.sent-noted"))}</p>`);
     }
-    reading = `${banners.join("")}<div class="read-inner"><p class="empty">从左侧选一封，或点「写信」。</p></div>`;
+    reading = `${banners.join("")}<div class="read-inner"><p class="empty">${escapeHtml(tr(shell, "empty.pick"))}</p></div>`;
   }
 
   return layout({
-    title: selected?.subject ? `${selected.subject} · Postgrove` : `${label} · Postgrove`,
+    title: selected?.subject ? pageTitle(shell, selected.subject) : pageTitle(shell, label),
     nav: folder,
     mailbox,
     mode: selected ? "read" : "list",
     simple: false,
     unreadCount: flags.unreadCount,
+    shell,
     body: `<section class="list">
       <div class="list-head">
         <h1>${escapeHtml(label)}</h1>
-        ${folderStrip(mailbox, folder)}
+        ${folderStrip(shell, mailbox, folder)}
       </div>
       ${list}
     </section>
@@ -1005,9 +1070,9 @@ function renderFolderPage(
   });
 }
 
-function folderStrip(mailbox: MailboxRecord, folder: SystemFolder): string {
-  return `<nav class="folder-strip" aria-label="文件夹">
-    ${folderNavLinks(folder, (id) => folderHref(mailbox, id))
+function folderStrip(shell: Shell, mailbox: MailboxRecord, folder: SystemFolder): string {
+  return `<nav class="folder-strip" aria-label="${escapeHtml(tr(shell, "nav.folders"))}">
+    ${folderNavLinks(folder, (id) => folderHref(mailbox, id), folderLabels(shell))
       .map(
         (item) =>
           `<a class="folder-chip${item.active ? " active" : ""}" href="${escapeHtml(item.href)}">${escapeHtml(item.label)}</a>`,
@@ -1045,20 +1110,20 @@ function folderMessageRow(
   </li>`;
 }
 
-function emptyInboxCopy(count: number, q: string, filter: InboxFilter): string {
+function emptyInboxCopy(shell: Shell, count: number, q: string, filter: InboxFilter): string {
   if (count > 0) {
     return "";
   }
   if (q) {
-    return `没有匹配「${q}」的信。`;
+    return tr(shell, "empty.search", { q });
   }
   if (filter === "unread") {
-    return "没有未读的信。";
+    return tr(shell, "empty.unread");
   }
   if (filter === "starred") {
-    return "还没有星标。";
+    return tr(shell, "empty.starred");
   }
-  return "还没有信。域名路由配好后，寄一封到你的地址试试。";
+  return tr(shell, "empty.inbox");
 }
 
 function threadRow(
@@ -1251,8 +1316,10 @@ function renderComposePage(
     mode?: ComposeMode;
     unreadCount: number;
     savedDraft?: boolean;
+    shell: Shell;
   },
 ): string {
+  const shell = opts.shell;
   const outbound = describeOutbound(env);
   const mode = opts.mode ?? "new";
   const heading = composeHeading(mode);
@@ -1261,7 +1328,7 @@ function renderComposePage(
     banners.push(attemptBanner(opts.highlighted));
   }
   if (opts.savedDraft) {
-    banners.push(`<p class="banner success">草稿已保存。主题和正文已保留，可继续写或从草稿箱打开。</p>`);
+    banners.push(`<p class="banner success">${escapeHtml(tr(shell, "banner.draft-saved"))}</p>`);
   }
   if (opts.formError) {
     banners.push(
@@ -1281,7 +1348,7 @@ function renderComposePage(
 
   const fromLine = mailbox
     ? `<p class="from-line">发件人 <span class="mono">${escapeHtml(mailbox.address)}</span></p>`
-    : `<p class="banner danger">没有可用地址。确认本地已经 migrate 并且 seed。</p>`;
+    : `<p class="banner danger">${escapeHtml(tr(shell, "banner.no-mailbox"))}</p>`;
 
   const threadLine = opts.form.inReplyTo
     ? `<p class="from-line">引用 <span class="mono">In-Reply-To: ${escapeHtml(opts.form.inReplyTo)}</span></p>`
@@ -1339,12 +1406,13 @@ function renderComposePage(
   const history = renderAttemptHistory(opts.attempts, opts.highlighted?.id ?? null);
 
   return layout({
-    title: `${heading} · Postgrove`,
+    title: pageTitle(shell, heading),
     nav: "compose",
     mailbox,
     mode: "list",
     simple: true,
     unreadCount: opts.unreadCount,
+    shell,
     body: `<main class="page"><div class="page-inner">
       <div class="page-head"><h1>${escapeHtml(heading)}</h1></div>
       <div class="page-card">${banners.join("")}${form}${history}</div>
@@ -1399,6 +1467,7 @@ function renderAttemptHistory(
 }
 
 function renderAddressesPage(
+  shell: Shell,
   mailboxes: MailboxRecord[],
   nav: NavId,
   unreadCount = 0,
@@ -1418,7 +1487,7 @@ function renderAddressesPage(
     <p class="banner">主人会话开地址不占成员配额。成员会话会记入该成员的地址配额，超了会明确报错。</p>`;
   let content: string;
   if (mailboxes.length === 0) {
-    content = `${emptyBlock("还没有地址。开一个，例如 you@yourdomain。")}${form}`;
+    content = `${emptyBlock(tr(shell, "empty.addresses"))}${form}`;
   } else {
     content = `<ul class="addr-list">${mailboxes
       .map(
@@ -1432,14 +1501,15 @@ function renderAddressesPage(
       .join("")}</ul>${form}`;
   }
   return layout({
-    title: "地址 · Postgrove",
+    title: pageTitle(shell, tr(shell, "heading.addresses")),
     nav,
     mailbox: current,
     mode: "list",
     simple: true,
     unreadCount,
+    shell,
     body: `<main class="page"><div class="page-inner">
-      <div class="page-head"><h1>地址</h1></div>
+      <div class="page-head"><h1>${escapeHtml(tr(shell, "heading.addresses"))}</h1></div>
       <div class="page-card">${banner}${content}</div>
     </div></main>`,
   });
@@ -1451,8 +1521,10 @@ function renderSettingsPage(
   hook: PublicHookConfig | null,
   deliveries: InboundDeliveryRecord[],
   unreadCount: number,
+  shell: Shell,
   error: string | null,
   saved: boolean,
+  langUpdated: boolean,
 ): string {
   const who =
     owner.kind === "mailbox"
@@ -1463,7 +1535,10 @@ function renderSettingsPage(
     banners.push(`<p class="banner danger">${escapeHtml(error)}</p>`);
   }
   if (saved) {
-    banners.push(`<p class="banner success">入站通知已保存。密钥若刚生成，只在 API 响应里出现一次。</p>`);
+    banners.push(`<p class="banner success">${escapeHtml(tr(shell, "banner.hooks-saved"))}</p>`);
+  }
+  if (langUpdated) {
+    banners.push(`<p class="banner success">${escapeHtml(tr(shell, "banner.lang-updated"))}</p>`);
   }
   banners.push(`<p class="banner">${escapeHtml(who)}</p>`);
   banners.push(`<p class="banner">新信可以推到 webhook，或转发到外部邮箱 / 聊天机器人 URL。失败记在下面，不会静默吞掉。</p>`);
@@ -1517,7 +1592,7 @@ function renderSettingsPage(
           </li>`;
         })
         .join("")}</ul>`
-    : `<div class="empty">${EMPTY_ART}<p>还没有投递记录。新信到达后会出现在这里。</p></div>`;
+    : `<div class="empty">${EMPTY_ART}<p>${escapeHtml(tr(shell, "empty.delivery-log"))}</p></div>`;
 
   const logout = `<form id="logout-form" class="logout-form">
         <button class="btn" type="submit">登出</button>
@@ -1535,17 +1610,35 @@ function renderSettingsPage(
         })();
       </script>`;
 
+  const localePref = shell.preference;
+  const languageForm = `<section class="grove-panel">
+          <h2>${escapeHtml(tr(shell, "label.language"))}</h2>
+          <form class="grove-form" method="post" action="/settings">
+            <input type="hidden" name="intent" value="locale">
+            <label>${escapeHtml(tr(shell, "label.language"))}
+              <select name="locale">
+                <option value="auto"${localePref === "auto" ? " selected" : ""}>${escapeHtml(tr(shell, "label.follow-browser"))}</option>
+                <option value="zh"${localePref === "zh" ? " selected" : ""}>${escapeHtml(tr(shell, "label.chinese"))}</option>
+                <option value="en"${localePref === "en" ? " selected" : ""}>${escapeHtml(tr(shell, "label.english"))}</option>
+              </select>
+            </label>
+            <button class="btn btn-primary" type="submit">${escapeHtml(tr(shell, "label.save-language"))}</button>
+          </form>
+        </section>`;
+
   return layout({
-    title: "设置 · Postgrove",
+    title: pageTitle(shell, tr(shell, "heading.settings")),
     nav: "settings",
     mailbox,
     mode: "list",
     simple: true,
     unreadCount,
+    shell,
     body: `<main class="page"><div class="page-inner">
-      <div class="page-head"><h1>设置</h1></div>
+      <div class="page-head"><h1>${escapeHtml(tr(shell, "heading.settings"))}</h1></div>
       <div class="page-card">
         ${banners.join("")}
+        ${languageForm}
         <section class="grove-panel">
           <h2>入站通知</h2>
           <p class="banner">验签：<span class="mono">HMAC-SHA256</span>，签名串 <span class="mono">\${unix_seconds}.\${raw_json_body}</span>。请求头 <span class="mono">X-Postgrove-Timestamp</span> 与 <span class="mono">X-Postgrove-Signature: v1=&lt;hex&gt;</span>。密钥错了或没带，接收方必须验失败。默认只允许 https；内网 / 元数据 / RFC1918 会被拒绝。</p>
@@ -1562,22 +1655,22 @@ function renderSettingsPage(
   });
 }
 
-function renderLoginPage(error: string, hint: string): string {
+function renderLoginPage(shell: Shell, error: string, hint: string): string {
   return `<!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="${documentLang(shell)}">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>登录 · Postgrove</title>
+  <title>${escapeHtml(pageTitle(shell, tr(shell, "heading.login")))}</title>
   <link rel="stylesheet" href="/app.css">
 </head>
 <body class="mode-list">
   <main class="page">
     <div class="page-inner">
-      <a class="brand" href="/">${GROVE_MARK}Postgrove</a>
-      <div class="page-head"><h1>登录</h1></div>
+      ${brandLink(shell, "/")}
+      <div class="page-head"><h1>${escapeHtml(tr(shell, "heading.login"))}</h1></div>
       <div class="page-card">
-        <p class="banner">登录已失效。重新登录后再继续。</p>
+        <p class="banner">${escapeHtml(tr(shell, "banner.login-expired"))}</p>
         <p class="banner"><code class="mono">${escapeHtml(error)}</code> — ${escapeHtml(hint)}</p>
         <form id="login-form" class="login-form">
           <label>地址
@@ -1586,7 +1679,7 @@ function renderLoginPage(error: string, hint: string): string {
           <label>口令
             <input name="token" class="search" type="password" autocomplete="current-password" required>
           </label>
-          <button class="btn btn-primary" type="submit">登录</button>
+          <button class="btn btn-primary" type="submit">${escapeHtml(tr(shell, "brand.login"))}</button>
           <p id="login-error" class="banner" hidden></p>
         </form>
       </div>
@@ -1628,14 +1721,15 @@ function renderLoginPage(error: string, hint: string): string {
 </html>`;
 }
 
-function renderForbidden(mailbox: MailboxRecord | null, unreadCount = 0): string {
+function renderForbidden(shell: Shell, mailbox: MailboxRecord | null, unreadCount = 0): string {
   return layout({
-    title: "无权查看 · Postgrove",
+    title: pageTitle(shell, tr(shell, "heading.admin")),
     nav: "inbox",
     mailbox,
     mode: "list",
     simple: true,
     unreadCount,
+    shell,
     body: `<main class="page"><div class="page-inner">
       <div class="page-card">
         <h1>无权查看这个地址</h1>
@@ -1646,14 +1740,15 @@ function renderForbidden(mailbox: MailboxRecord | null, unreadCount = 0): string
   });
 }
 
-function renderNotFound(mailbox: MailboxRecord | null = null, unreadCount = 0): string {
+function renderNotFound(shell: Shell, mailbox: MailboxRecord | null = null, unreadCount = 0): string {
   return layout({
-    title: "未找到 · Postgrove",
+    title: pageTitle(shell, tr(shell, "nav.inbox")),
     nav: "inbox",
     mailbox,
     mode: "list",
     simple: true,
     unreadCount,
+    shell,
     body: `<main class="page"><div class="page-inner">
       <div class="page-card">
         <h1>没有这封信或这个地址</h1>
@@ -1668,6 +1763,16 @@ function emptyBlock(copy: string): string {
   return `<div class="empty">${EMPTY_ART}<p>${escapeHtml(copy)}</p></div>`;
 }
 
+function folderLabels(shell: Shell): Record<SystemFolder, string> {
+  return {
+    inbox: tr(shell, "nav.inbox"),
+    sent: tr(shell, "nav.sent"),
+    draft: tr(shell, "nav.draft"),
+    trash: tr(shell, "nav.trash"),
+    spam: tr(shell, "nav.spam"),
+  };
+}
+
 function layout(opts: {
   title: string;
   nav: NavId;
@@ -1676,6 +1781,7 @@ function layout(opts: {
   simple: boolean;
   body: string;
   unreadCount?: number;
+  shell: Shell;
 }): string {
   const inbox = inboxHref(opts.mailbox);
   const unreadHref = opts.mailbox ? `${boxPath(opts.mailbox.id)}?filter=unread` : inbox;
@@ -1684,14 +1790,14 @@ function layout(opts: {
   const unreadCount = opts.unreadCount ?? 0;
   const countBadge =
     unreadCount > 0
-      ? `<span class="nav-count" aria-label="${unreadCount} 封未读">${unreadCount}</span>`
+      ? `<span class="nav-count" aria-label="${unreadCount} ${escapeHtml(tr(opts.shell, "nav.unread"))}">${unreadCount}</span>`
       : "";
   const chip = opts.mailbox
-    ? `<div class="mailbox-chip"><span class="label">当前地址</span><span class="addr">${escapeHtml(opts.mailbox.address)}</span></div>`
+    ? `<div class="mailbox-chip"><span class="label">${escapeHtml(tr(opts.shell, "label.current-mailbox"))}</span><span class="addr">${escapeHtml(opts.mailbox.address)}</span></div>`
     : "";
 
   return `<!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="${documentLang(opts.shell)}">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -1701,31 +1807,31 @@ function layout(opts: {
 <body class="mode-${opts.mode}">
   <div class="shell${opts.simple ? " simple" : ""}">
     <aside class="nav">
-      <a class="brand" href="${escapeHtml(inbox)}">${GROVE_MARK}Postgrove</a>
+      ${brandLink(opts.shell, inbox)}
       <ul class="nav-list">
-        ${folderNavLinks(opts.nav, (id) => folderHref(opts.mailbox, id))
+        ${folderNavLinks(opts.nav, (id) => folderHref(opts.mailbox, id), folderLabels(opts.shell))
           .map((item) => {
             const badge = item.id === "inbox" ? countBadge : "";
             return `<li><a class="${item.active ? "active" : ""}" href="${escapeHtml(item.href)}">${escapeHtml(item.label)}${badge}</a></li>`;
           })
           .join("")}
-        <li><a class="${opts.nav === "unread" ? "active" : ""}" href="${escapeHtml(unreadHref)}">未读</a></li>
+        <li><a class="${opts.nav === "unread" ? "active" : ""}" href="${escapeHtml(unreadHref)}">${escapeHtml(tr(opts.shell, "nav.unread"))}</a></li>
       </ul>
       <ul class="nav-list nav-tools">
-        <li><a class="${opts.nav === "compose" ? "active" : ""}" href="${escapeHtml(compose)}">写信</a></li>
-        <li><a class="${opts.nav === "addresses" ? "active" : ""}" href="/addresses">地址</a></li>
-        <li><a class="${opts.nav === "admin" ? "active" : ""}" href="/admin">值守</a></li>
-        <li><a class="${opts.nav === "settings" ? "active" : ""}" href="${escapeHtml(settings)}">设置</a></li>
+        <li><a class="${opts.nav === "compose" ? "active" : ""}" href="${escapeHtml(compose)}">${escapeHtml(tr(opts.shell, "nav.compose"))}</a></li>
+        <li><a class="${opts.nav === "addresses" ? "active" : ""}" href="/addresses">${escapeHtml(tr(opts.shell, "nav.addresses"))}</a></li>
+        <li><a class="${opts.nav === "admin" ? "active" : ""}" href="/admin">${escapeHtml(tr(opts.shell, "nav.admin"))}</a></li>
+        <li><a class="${opts.nav === "settings" ? "active" : ""}" href="${escapeHtml(settings)}">${escapeHtml(tr(opts.shell, "nav.settings"))}</a></li>
       </ul>
       ${chip}
     </aside>
     ${opts.body}
   </div>
-  <nav class="mobile-nav" aria-label="主导航">
-    <a class="${(SYSTEM_FOLDERS as readonly string[]).includes(opts.nav) ? "active" : ""}" href="${escapeHtml(inbox)}">收件箱${countBadge}</a>
-    <a class="${opts.nav === "unread" ? "active" : ""}" href="${escapeHtml(unreadHref)}">未读</a>
-    <a class="${opts.nav === "compose" ? "active" : ""}" href="${escapeHtml(compose)}">写信</a>
-    <a class="${opts.nav === "settings" ? "active" : ""}" href="${escapeHtml(settings)}">设置</a>
+  <nav class="mobile-nav" aria-label="${escapeHtml(tr(opts.shell, "nav.main"))}">
+    <a class="${(SYSTEM_FOLDERS as readonly string[]).includes(opts.nav) ? "active" : ""}" href="${escapeHtml(inbox)}">${escapeHtml(tr(opts.shell, "nav.inbox"))}${countBadge}</a>
+    <a class="${opts.nav === "unread" ? "active" : ""}" href="${escapeHtml(unreadHref)}">${escapeHtml(tr(opts.shell, "nav.unread"))}</a>
+    <a class="${opts.nav === "compose" ? "active" : ""}" href="${escapeHtml(compose)}">${escapeHtml(tr(opts.shell, "nav.compose"))}</a>
+    <a class="${opts.nav === "settings" ? "active" : ""}" href="${escapeHtml(settings)}">${escapeHtml(tr(opts.shell, "nav.settings"))}</a>
   </nav>
 </body>
 </html>`;

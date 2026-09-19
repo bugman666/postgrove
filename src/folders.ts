@@ -117,10 +117,11 @@ export function publicFolderList(): { id: SystemFolder; label: string }[] {
 export function folderNavLinks(
   active: string,
   hrefFor: (folder: SystemFolder) => string,
+  labels: Record<SystemFolder, string> = FOLDER_LABELS,
 ): { id: SystemFolder; label: string; href: string; active: boolean }[] {
   return SYSTEM_FOLDERS.map((id) => ({
     id,
-    label: FOLDER_LABELS[id],
+    label: labels[id],
     href: hrefFor(id),
     active: active === id,
   }));
