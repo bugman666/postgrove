@@ -17,8 +17,10 @@ import {
   DEFAULT_ACCENT,
   LOGO_FAIL_HINT,
   brandOverrideCss,
+  gateLogoUrl,
   saveBranding,
   setLogoFetchForTests,
+  setLogoResolveForTests,
 } from "../src/branding.ts";
 import type { Env } from "../src/env.ts";
 import { handleApi } from "../src/api.ts";
@@ -205,6 +207,7 @@ function adminHeaders(extra?: Record<string, string>): Record<string, string> {
 
 afterEach(() => {
   setLogoFetchForTests(null);
+  setLogoResolveForTests(null);
 });
 
 test("TC13.1 admin stats show user count, today's mail, and storage MB", async () => {
@@ -512,6 +515,36 @@ test("TC13.4 unauthenticated stats and branding mutate are 401; mailbox is 403",
     env,
   );
   assert.equal(ownerGate.ok, true);
+});
+
+test("logo probe rejects metadata hosts and DNS to a private IP", async () => {
+  const db = new MemoryD1();
+  const env = testEnv(db);
+
+  await assert.rejects(
+    () => gateLogoUrl("https://metadata.google.internal/logo.png"),
+    (error: unknown) => error instanceof Error && error.message === LOGO_FAIL_HINT,
+  );
+  await assert.rejects(
+    () => gateLogoUrl("https://169.254.169.254/latest/meta-data"),
+    (error: unknown) => error instanceof Error && error.message === LOGO_FAIL_HINT,
+  );
+
+  let fetched = false;
+  setLogoResolveForTests(async () => ["10.1.2.3"]);
+  setLogoFetchForTests(async () => {
+    fetched = true;
+    return new Response("ok", { status: 200 });
+  });
+  const blocked = await saveBranding(env, { logo_url: "https://cdn.example.test/mark.svg" }).catch(
+    (error: { message?: string }) => error,
+  );
+  assert.equal(fetched, false);
+  assert.equal((blocked as { message?: string }).message, LOGO_FAIL_HINT);
+
+  setLogoResolveForTests(async () => ["203.0.113.10"]);
+  const saved = await saveBranding(env, { logo_url: "https://cdn.example.test/mark.svg" });
+  assert.equal(saved.logo_url, "https://cdn.example.test/mark.svg");
 });
 
 test("admin cookie can open overview and site pages", async () => {

@@ -228,6 +228,8 @@ export function resolveOutboundAdapter(env: Env): AdapterResolve {
     return { ok: true, adapter: new ResendAdapter(apiKey) };
   }
   if (name === "http") {
+    // Operator-trusted deploy hook (env / wrangler secret). Not a UI field.
+    // If this is ever accepted from settings, run validateSafeUrl first.
     const url = env.OUTBOUND_HTTP_URL?.trim() ?? "";
     if (!url) {
       return {

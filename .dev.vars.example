@@ -21,6 +21,8 @@
 #
 # OWNER_TOKEN is one shared secret for every mailbox — not a per-address password.
 # Anyone who has it can open any active address (break-glass / deploy owner).
+# Production: prefer member tokens + admin (POST /admin/users) for day-to-day
+# login; keep OWNER_TOKEN for recovery, not a shared operator password.
 # Mailbox members use their own token (issued on POST /admin/users).
 # ADMIN_TOKEN (or an admin-role member session) opens /admin.
 #
@@ -30,6 +32,8 @@
 #
 # POST /auth/login is limited to 8 attempts per 10 minutes per IP (in-memory,
 # per Worker isolate). A 429 includes a human-readable hint and Retry-After.
+# REST / signup use the same per-isolate counters. A shared Durable Object
+# limiter is a follow-up if you run many isolates — not required for v0.1.
 
 # HMAC secret for the owner session cookie (min 16 characters). Rotate to revoke sessions.
 SESSION_SECRET=change-me-local-session-secret
@@ -53,6 +57,9 @@ OUTBOUND_PROVIDER=stub
 
 # Alternative: OUTBOUND_PROVIDER=http
 # POST JSON { from, to, subject, text } to this URL.
+# OUTBOUND_HTTP_URL is operator-trusted only (env / wrangler secret).
+# Do not accept it from the UI. If a settings field is ever added, it must
+# go through validateSafeUrl (same as inbound webhook / forward URLs).
 # OUTBOUND_HTTP_URL=
 # OUTBOUND_HTTP_TOKEN=
 
@@ -92,7 +99,10 @@ ATTACHMENT_MAX_COUNT=10
 # Settings / POST /api/v1/aliases can list generated aliases (own domain only).
 #
 # Inbound webhooks / forward (#11). Default: https only; validateSafeUrl on
-# save, fetch, and each redirect. Set to 1 for local http://127.0.0.1 hooks.
+# save, fetch, and each redirect. webhook_secret is stored enveloped
+# (enc:v1:, key from SESSION_SECRET); mint/rotate shows plaintext once.
+# Leftover plaintext rows wrap on next read/save; rotate after SESSION_SECRET change.
+# Set to 1 for local http://127.0.0.1 hooks.
 # ALLOW_PRIVATE_WEBHOOKS=0
 #
 # Dev inbox API (/api/v1/dev/inboxes). Own domain only — not a public

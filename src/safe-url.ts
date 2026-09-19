@@ -10,6 +10,11 @@
  * dialer. Re-validate each Location if you follow redirects yourself.
  * `redirect: "follow"` leaves residual risk after a public first hop.
  *
+ * `recheckResolvedIps` is the shared DNS follow-up (DoH A/AAAA, then
+ * `isBlockedIp` on every answer). Webhook delivery and logo probe both
+ * call it so a public hostname that resolves to RFC1918 / metadata is
+ * rejected the same way.
+ *
  * `ALLOW_PRIVATE_WEBHOOKS=1` is a documented caller convention for local
  * http hooks. This module only honors `opts.allowPrivate`; it does not
  * read the environment.
@@ -23,6 +28,15 @@ export type ValidateSafeUrlOptions = {
 export type ValidateSafeUrlResult =
   | { ok: true; url: URL }
   | { ok: false; error: string; hint: string };
+
+/** Return [] for NXDOMAIN, null to skip the IP re-check (resolver unavailable). */
+export type ResolveHost = (hostname: string) => Promise<string[] | null>;
+
+export type RecheckResolvedIpsResult =
+  | { ok: true }
+  | { ok: false; error: string; hint: string };
+
+type FetchImpl = typeof fetch;
 
 const BLOCKED_HOSTNAMES = new Set([
   "localhost",
@@ -94,6 +108,91 @@ export function isBlockedIp(ip: string): boolean {
     return isBlockedIpv4(ipv4MappedOctets(parsed.hextets));
   }
   return isBlockedIpv6(parsed.hextets);
+}
+
+/** True when `host` is a textual IPv4/IPv6 address (optional `[…]` brackets). */
+export function isIpLiteral(host: string): boolean {
+  return parseIp(host) !== null;
+}
+
+/**
+ * Re-check A/AAAA answers after validateSafeUrl. Literal IPs are skipped
+ * (already gated). `resolveHost` returning null, or a thrown resolver,
+ * skips the IP gate (same fail-open as webhook delivery when DoH is down).
+ */
+export async function recheckResolvedIps(
+  hostname: string,
+  opts: {
+    allowPrivate?: boolean;
+    resolveHost?: ResolveHost;
+    fetchImpl?: FetchImpl;
+  } = {},
+): Promise<RecheckResolvedIpsResult> {
+  if (isIpLiteral(hostname)) {
+    return { ok: true };
+  }
+  const fetchImpl = opts.fetchImpl ?? fetch;
+  const resolveHost = opts.resolveHost ?? ((name) => resolveHostDoH(name, fetchImpl));
+  let ips: string[] | null;
+  try {
+    ips = await resolveHost(hostname);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "unknown";
+    console.log("safe-url: DNS re-check skipped", { hostname, detail });
+    return { ok: true };
+  }
+  if (ips === null) {
+    return { ok: true };
+  }
+  if (ips.length === 0) {
+    return {
+      ok: false,
+      error: "unresolved_host",
+      hint: `Host "${hostname}" did not resolve. Outbound fetch was not sent.`,
+    };
+  }
+  if (opts.allowPrivate === true) {
+    return { ok: true };
+  }
+  for (const ip of ips) {
+    if (isBlockedIp(ip)) {
+      return {
+        ok: false,
+        error: "blocked_destination",
+        hint: `Host "${hostname}" resolved to blocked address ${ip}. Internal, metadata, loopback, RFC1918, link-local, and CGNAT targets are rejected after DNS.`,
+      };
+    }
+  }
+  return { ok: true };
+}
+
+/** Cloudflare DoH A + AAAA. Non-OK or thrown fetch → null (skip IP gate). */
+export async function resolveHostDoH(
+  hostname: string,
+  fetchImpl: FetchImpl = fetch,
+): Promise<string[] | null> {
+  const ips = new Set<string>();
+  try {
+    for (const type of ["A", "AAAA"] as const) {
+      const url = `https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(hostname)}&type=${type}`;
+      const response = await fetchImpl(url, {
+        headers: { accept: "application/dns-json" },
+        redirect: "manual",
+      });
+      if (!response.ok) {
+        return null;
+      }
+      const body = (await response.json()) as { Answer?: Array<{ type?: number; data?: string }> };
+      for (const answer of body.Answer ?? []) {
+        if ((answer.type === 1 || answer.type === 28) && typeof answer.data === "string") {
+          ips.add(answer.data.replace(/\.$/, ""));
+        }
+      }
+    }
+    return [...ips];
+  } catch {
+    return null;
+  }
 }
 
 function invalidUrl(hint: string): ValidateSafeUrlResult {

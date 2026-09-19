@@ -3,6 +3,8 @@ import { test } from "node:test";
 import {
   isBlockedHostname,
   isBlockedIp,
+  isIpLiteral,
+  recheckResolvedIps,
   validateSafeUrl,
 } from "../src/safe-url.ts";
 
@@ -150,4 +152,40 @@ test("isBlockedIp covers IPv4/IPv6 textual ranges", () => {
   assert.equal(isBlockedIp("::ffff:8.8.8.8"), false);
   assert.equal(isBlockedIp("2001:4860:4860::8888"), false);
   assert.equal(isBlockedIp("not-an-ip"), false);
+});
+
+test("isIpLiteral accepts textual IPv4/IPv6", () => {
+  assert.equal(isIpLiteral("8.8.8.8"), true);
+  assert.equal(isIpLiteral("127.0.0.1"), true);
+  assert.equal(isIpLiteral("::1"), true);
+  assert.equal(isIpLiteral("[::1]"), true);
+  assert.equal(isIpLiteral("cdn.example.test"), false);
+});
+
+test("recheckResolvedIps rejects a hostname that resolves to RFC1918", async () => {
+  const blocked = await recheckResolvedIps("cdn.example.test", {
+    resolveHost: async () => ["10.1.2.3"],
+  });
+  assert.equal(blocked.ok, false);
+  if (!blocked.ok) {
+    assert.equal(blocked.error, "blocked_destination");
+    assert.match(blocked.hint, /10\.1\.2\.3/);
+  }
+
+  const publicOk = await recheckResolvedIps("cdn.example.test", {
+    resolveHost: async () => ["203.0.113.10"],
+  });
+  assert.equal(publicOk.ok, true);
+
+  const skip = await recheckResolvedIps("cdn.example.test", {
+    resolveHost: async () => null,
+  });
+  assert.equal(skip.ok, true);
+
+  const literal = await recheckResolvedIps("8.8.8.8", {
+    resolveHost: async () => {
+      throw new Error("should not resolve a literal");
+    },
+  });
+  assert.equal(literal.ok, true);
 });
