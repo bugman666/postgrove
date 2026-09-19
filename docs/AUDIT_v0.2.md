@@ -1,5 +1,45 @@
 # Postgrove audit — v0.2 backlog
 
+## v0.2-polish status
+
+v0.2-polish closed on main (`ecf90e8`, PR [#72](https://github.com/bugman666/postgrove/pull/72) / migration `0018`). This audit was written at `e11c12f` (v0.1.0). Findings below stay as the historical record; use this section for what landed and what is next. Release notes: [`docs/RELEASE_NOTES_v0.2.md`](RELEASE_NOTES_v0.2.md).
+
+**Shipped vs AUDIT (v0.2-polish)**
+
+| Item | Status | Landed as |
+|------|--------|-----------|
+| P0-1 Body CTE (QP/base64 on text/plain+html) | Shipped | #54 / PR #56 |
+| P0-2 Inbound R2 fail-loud (rollback D1 + `setReject`) | Shipped | #55 / PR #57 |
+| P2-1 `ui.ts` split + batched thread reads | Shipped | #47 / PR #58 |
+| Theme E / outbox (pending + idempotency + limited retry) | Shipped | #48 / PR #59 · `0015` |
+| MIME malice fixtures + shared MemoryD1 | Shipped | #49 / PR #60 |
+| P2-11 smoke CI + empty-D1 migrate | Shipped | #50 / PR #63 |
+| P1-2 Shared rate-limit KV + auth matrix (memory fallback if no binding) | Shipped | #51 / PR #62 |
+| P1-1 Production auth / `OWNER_TOKEN` as break-glass (`auth_mode`) | Shipped (token still exists) | #52 / PR #61 |
+| Outbound URL gate (`assertOutboundHttpUrl`; `OUTBOUND_HTTP_STRICT` default off) | Shipped | #52 / PR #61 |
+| P2-8 UX: nav regroup, empty states, layered errors | Shipped | #53 / PR #69 |
+| P2-3 FTS5 search (LIKE fallback) | Shipped | #66 / PR #70 · `0016` |
+| Persistent `thread_id` | Shipped | #68 / PR #73 · `0017` |
+| P2-12 OpenAPI + `docs/API.md` / `llms.txt` + `docs/DEPLOY.md` | Shipped | #64 / #65 / PR #71 |
+| P2-6 webhook retry (pending + scheduled drain) | Shipped | #67 / PR #72 · `0018` |
+| P1-10 no bare POST when signing secret is missing | Shipped with #67 | #67 / PR #72 |
+
+**Still open → proposed v0.3-hardening** (docs only here; do not treat this list as an implementation ticket)
+
+Standing engineering rule: [#33](https://github.com/bugman666/postgrove/issues/33) remains **open**.
+
+1. P1-4 DoH fail-open → fail-closed or `SAFE_URL_DNS_FAIL=closed`
+2. P1-3 CSRF / GET side effects (mark-read) → Origin+Referer or POST-only
+3. P1-6 signup domain allowlist (Turnstile ≠ domain gate)
+4. P1-7 extract custom RegExp ReDoS → ban custom or timeout/allowlist
+5. P1-8 quota check-then-act races
+6. P1-9 inbound no hard size cap before buffering
+7. P2-7 CSP / `frame-ancestors`; P2-15 `SESSION_SECRET` dual-use (already documented)
+
+Other backlog rows in sections 2–4 (pagination, trash retention, inbound transaction, outbound attach, HTML preview, unify mailbox insert, …) are unchanged and still later.
+
+---
+
 Audit of **bugman666/postgrove** at `e11c12f` (v0.1.0 shipped). Docs-only: findings and a practical optimization backlog. No large features in this change.
 
 Capability ideas follow mainstream mailbox UX and MIT Workers mail patterns (for example cloud-mail). Do **not** clone AGPL mail-hub source. UI / brand stay original (light editorial, paper + forest).
