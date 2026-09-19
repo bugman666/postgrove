@@ -251,8 +251,24 @@ export class MemoryStatement {
 
     if (sql.includes("from inbound_deliveries")) {
       let rows = this.db.inbound_deliveries.slice();
-      if (sql.includes("where mailbox_id") || sql.includes("mailbox_id =")) {
+      if (sql.includes("delivery_key =")) {
+        rows = rows.filter((row) => row.mailbox_id === a && row.delivery_key === this.binds[1]);
+      } else if (sql.includes("where id =")) {
+        rows = rows.filter((row) => row.id === a);
+      } else if (sql.includes("status = 'pending'") && sql.includes("next_attempt_at")) {
+        rows = rows.filter(
+          (row) =>
+            row.status === "pending" &&
+            row.next_attempt_at != null &&
+            Number(row.next_attempt_at) <= Number(a),
+        );
+        return rows.sort((left, right) => Number(left.next_attempt_at) - Number(right.next_attempt_at));
+      } else if (sql.includes("where mailbox_id") && sql.includes("status =")) {
+        rows = rows.filter((row) => row.mailbox_id === a && row.status === this.binds[1]);
+      } else if (sql.includes("where mailbox_id") || sql.includes("mailbox_id =")) {
         rows = rows.filter((row) => row.mailbox_id === a);
+      } else if (sql.includes("where status =")) {
+        rows = rows.filter((row) => row.status === a);
       }
       return rows.sort((left, right) => Number(right.created_at) - Number(left.created_at));
     }
@@ -670,18 +686,58 @@ export class MemoryStatement {
     }
 
     if (sql.startsWith("insert into inbound_deliveries")) {
+      const dup = this.db.inbound_deliveries.some(
+        (row) => row.mailbox_id === binds[1] && row.delivery_key === binds[10],
+      );
+      if (dup) {
+        throw new Error("UNIQUE constraint failed: inbound_deliveries.mailbox_id, inbound_deliveries.delivery_key");
+      }
       this.db.inbound_deliveries.unshift({
         id: binds[0],
         mailbox_id: binds[1],
         message_id: binds[2],
         kind: binds[3],
-        target: binds[4],
-        status: binds[5],
-        http_status: binds[6],
-        error: binds[7],
-        hint: binds[8],
-        created_at: binds[9],
+        channel: binds[4],
+        target: binds[5],
+        status: binds[6],
+        http_status: binds[7],
+        error: binds[8],
+        hint: binds[9],
+        delivery_key: binds[10],
+        attempt_count: binds[11],
+        max_attempts: binds[12],
+        next_attempt_at: binds[13],
+        last_attempt_at: binds[14],
+        payload_json: binds[15],
+        created_at: binds[16],
+        updated_at: binds[17],
       });
+      return 1;
+    }
+
+    if (sql.startsWith("update inbound_deliveries")) {
+      const row = this.db.inbound_deliveries.find((item) => item.id === binds[0]);
+      if (!row) {
+        return 0;
+      }
+      if (sql.includes("where id =") && sql.includes("status = 'pending'")) {
+        if (row.status !== "pending" || row.next_attempt_at == null || Number(row.next_attempt_at) > Number(binds[2])) {
+          return 0;
+        }
+        row.next_attempt_at = binds[1];
+        row.updated_at = binds[2];
+        return 1;
+      }
+      row.target = binds[1];
+      row.status = binds[2];
+      row.http_status = binds[3];
+      row.error = binds[4];
+      row.hint = binds[5];
+      row.attempt_count = binds[6];
+      row.next_attempt_at = binds[7];
+      row.last_attempt_at = binds[8];
+      row.payload_json = binds[9];
+      row.updated_at = binds[10];
       return 1;
     }
 

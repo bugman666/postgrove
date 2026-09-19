@@ -44,5 +44,10 @@
       "globs": ["**/*.jpg"],
       "fallthrough": true
     }
-  ]
+  ],
+  // Drain due inbound webhook / forward deliveries (pending + next_attempt_at).
+  // Signing skew stays ±5 minutes; each retry mints a fresh timestamp.
+  "triggers": {
+    "crons": ["*/2 * * * *"]
+  }
 }

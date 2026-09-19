@@ -58,6 +58,7 @@ import {
   HookInputError,
   getHookConfig,
   listDeliveries,
+  parseDeliveryStatus,
   parseHookConfigBody,
   publicDelivery,
   publicHookConfig,
@@ -896,8 +897,17 @@ async function listOwnerDeliveries(env: Env, owner: MailboxActor, url: URL): Pro
   }
   const rawLimit = Number(url.searchParams.get("limit") ?? "50");
   const limit = Number.isFinite(rawLimit) ? rawLimit : 50;
+  let status: ReturnType<typeof parseDeliveryStatus> = null;
   try {
-    const deliveries = await listDeliveries(env, mailbox.id, limit);
+    status = parseDeliveryStatus(url.searchParams.get("status"));
+  } catch (error) {
+    if (error instanceof HookInputError) {
+      return json({ ok: false, error: error.error, hint: error.message }, 400);
+    }
+    throw error;
+  }
+  try {
+    const deliveries = await listDeliveries(env, mailbox.id, limit, status);
     return json({
       ok: true,
       mailbox: publicMailbox(mailbox),

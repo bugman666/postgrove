@@ -61,7 +61,7 @@ See Issues under milestones `P0-MVP` … `P3-dev-api`. Longer write-ups: [produc
 
 First-cut notes: [RELEASE_NOTES_v0.1](docs/RELEASE_NOTES_v0.1.md).
 
-P0 inbox on the Worker: list / read / delete against D1, inbound attachments in R2, plus compose/send behind the owner session. Search (D1 FTS5 on from / To / subject / body, LIKE fallback), unread toggle with a nav count, and star/flag are in. System folders (inbox / sent / drafts / trash / spam) use the existing `messages.folder` column; drafts save and resume on `/compose`. Outbound is pluggable (`stub` / `resend` / `http`). Reply / reply-all / forward prefill compose and send through the same adapters (In-Reply-To / References on reply). The inbox list groups related mail into basic threads (count on the row; open expands in time order). Mailbox-scoped REST tokens live under `/api/v1` (hash at rest, `Authorization: Bearer pg_…`). Tokens are **mailbox** or **admin** kind; mailbox keys stay on one address, admin keys (or `ADMIN_TOKEN`) may act across mailboxes. Optional per-token daily request / send quotas fail loud (`quota_api` / `quota_send`). Plus-tag subaddressing (`user+tag@your-domain`) lands in the primary mailbox; Settings can generate/list aliases on that domain only. Developer ephemeral inboxes (`/api/v1/dev/inboxes`) mint a short-lived address on **this deployment's own domain**, then wait / extract OTP or link / close. Public signup is **off** unless Turnstile is configured. Small-team members (`users` + `user_mailboxes`) have address / storage / daily-send quotas; `/admin` is a forest-token 值守台 (ADMIN_TOKEN or admin role) with a light overview (users / today's mail / attachment MB) and site title / logo / accent (`--pg-color-brand` only). The UI follows `Accept-Language` (en / zh) and can be forced from Settings. Inbound webhooks POST a signed JSON payload; optional forward goes to a chat-bot URL or an external mailbox. Delivery failures stay on `/settings` and `/admin` (never swallowed). Outbound send attachments are a later follow-up. Light-editorial brand art (paper + forest green) lives in [`docs/assets/`](docs/assets/).
+P0 inbox on the Worker: list / read / delete against D1, inbound attachments in R2, plus compose/send behind the owner session. Search (D1 FTS5 on from / To / subject / body, LIKE fallback), unread toggle with a nav count, and star/flag are in. System folders (inbox / sent / drafts / trash / spam) use the existing `messages.folder` column; drafts save and resume on `/compose`. Outbound is pluggable (`stub` / `resend` / `http`). Reply / reply-all / forward prefill compose and send through the same adapters (In-Reply-To / References on reply). The inbox list groups related mail into basic threads (count on the row; open expands in time order). Mailbox-scoped REST tokens live under `/api/v1` (hash at rest, `Authorization: Bearer pg_…`). Tokens are **mailbox** or **admin** kind; mailbox keys stay on one address, admin keys (or `ADMIN_TOKEN`) may act across mailboxes. Optional per-token daily request / send quotas fail loud (`quota_api` / `quota_send`). Plus-tag subaddressing (`user+tag@your-domain`) lands in the primary mailbox; Settings can generate/list aliases on that domain only. Developer ephemeral inboxes (`/api/v1/dev/inboxes`) mint a short-lived address on **this deployment's own domain**, then wait / extract OTP or link / close. Public signup is **off** unless Turnstile is configured. Small-team members (`users` + `user_mailboxes`) have address / storage / daily-send quotas; `/admin` is a forest-token 值守台 (ADMIN_TOKEN or admin role) with a light overview (users / today's mail / attachment MB) and site title / logo / accent (`--pg-color-brand` only). The UI follows `Accept-Language` (en / zh) and can be forced from Settings. Inbound webhooks POST a signed JSON payload; optional forward goes to a chat-bot URL or an external mailbox. Failed deliveries stay on `/settings` and `/admin` as `pending` then retry via cron (never swallowed). Outbound send attachments are a later follow-up. Light-editorial brand art (paper + forest green) lives in [`docs/assets/`](docs/assets/).
 
 ## Local development
 
@@ -264,7 +264,7 @@ Expect JSON with `"ok": true` and `"db": "ready"` after migrations. A `503` with
 
 Local example uses `OUTBOUND_PROVIDER=stub`: the adapter records the attempt and returns success without sending. Real providers fail **loud** when config is missing or the key is rejected — the row is stored as `failed` and the compose page shows the error plus the next step.
 
-Send is outbox-first (mainstream outbox / send-status idea): the Worker writes `outbound_attempts` as `pending` with an **idempotency key** before the provider call, then updates `sent` / `failed` and the Sent folder. Repeat `POST /api/send` or `POST /api/v1/messages` with the same `Idempotency-Key` header or JSON `idempotency_key` returns the original attempt and does not call the provider again. Transient provider errors (network, 429, 5xx) retry inside that request up to 3 times. `wrangler.jsonc` has no cron triggers yet — a scheduled drain of leftover `pending` rows is a later step; replay the same key (or send again) to finish work.
+Send is outbox-first (mainstream outbox / send-status idea): the Worker writes `outbound_attempts` as `pending` with an **idempotency key** before the provider call, then updates `sent` / `failed` and the Sent folder. Repeat `POST /api/send` or `POST /api/v1/messages` with the same `Idempotency-Key` header or JSON `idempotency_key` returns the original attempt and does not call the provider again. Transient provider errors (network, 429, 5xx) retry inside that request up to 3 times. Leftover outbound `pending` finishes by replaying the same key. Inbound webhook / forward deliveries use a separate scheduled drain (see below).
 
 | Env | Role |
 |-----|------|
@@ -316,9 +316,10 @@ When a message is stored, Postgrove can notify a webhook and/or relay to a chat-
 | Surface | Auth | Role |
 |---------|------|------|
 | `GET`/`POST /api/hooks` | `requireOwner` | Read / save this mailbox's webhook + forward |
-| `GET /api/hooks/attempts` | `requireOwner` | Delivery log for this mailbox |
+| `GET /api/hooks/attempts` | `requireOwner` | Delivery log for this mailbox (optional `status`) |
 | `GET`/`POST /admin/hooks` | `requireAdmin` | Same config for any `mailbox_id` |
-| `GET /admin/deliveries` | `requireAdmin` | Delivery log (optional `mailbox_id`) |
+| `GET /admin/deliveries` | `requireAdmin` | Delivery log (optional `mailbox_id`, `status`) |
+| `POST /admin/webhook-deliveries/drain` | `requireAdmin` | Manually drain due `pending` rows |
 | `GET`/`POST /settings` | `requireOwner` | Forest-token settings UI (not a cloud-mail clone) |
 
 Unauthorized → **401**. A mailbox/owner session on admin hook routes → **403**.
@@ -329,15 +330,15 @@ Unauthorized → **401**. A mailbox/owner session on admin hook routes → **403
 - `X-Postgrove-Signature`: `v1=<hex>`
 - `X-Postgrove-Event`: `inbound`
 
-Signed string: `` `${timestamp}.${raw_json_body}` `` (UTF-8). MAC: **HMAC-SHA256**, hex digest. A missing or wrong `webhook_secret` must fail verification (constant-time hex compare). Suggested clock skew: ±5 minutes.
+Signed string: `` `${timestamp}.${raw_json_body}` `` (UTF-8). MAC: **HMAC-SHA256**, hex digest. A missing or wrong `webhook_secret` must fail verification (constant-time hex compare). Clock skew stays **±5 minutes** (`WEBHOOK_MAX_SKEW_SECONDS`). Retries mint a **fresh** `X-Postgrove-Timestamp` and re-sign; they do not replay an old signed body outside the skew window. Receivers should dedupe on `delivery_id` / `event_id`.
 
 **Secret at rest.** D1 stores `webhook_secret` as `enc:v1:` (AES-GCM, key from `SESSION_SECRET`) so a DB dump is not the signing key. Mint and rotate still return the plaintext **once**; later `GET` only has `webhook_secret_set`. Delivery opens the envelope to sign. Leftover plaintext rows (pre-`0014_webhook_secret_envelope.sql`) are wrapped on the next read or save. After a `SESSION_SECRET` rotation, re-rotate hook secrets — old envelopes will not open. A one-way hash (like API tokens) cannot be used here because outbound signing still needs the plaintext.
 
-Payload fields: `event`, `message_id`, `mailbox_id`, `from`, `to`, `subject`, `snippet`, `text`, `received_at`.
+Payload fields: `event`, `event_id`, `delivery_id`, `message_id`, `mailbox_id`, `from`, `to`, `subject`, `snippet`, `text`, `received_at`.
 
 Optional **forward URL** POSTs `{ event: "inbound.forward", text, content, from, to, subject, snippet, message_id }` (chat bots that read `text` or `content`). Optional **forward email** uses the existing outbound adapter.
 
-Downstream HTTP errors and SSRF rejects are stored in `inbound_deliveries` and shown on `/settings` and the 值守台. Fancy retries are out of scope.
+Downstream HTTP errors and SSRF rejects are stored in `inbound_deliveries` (`pending` / `sent` / `failed`) and shown on `/settings` and the 值守台. First failure writes `pending` with exponential backoff (`next_attempt_at`). A Worker cron (`triggers.crons` in `wrangler.jsonc`, every 2 minutes) drains due rows; `POST /admin/webhook-deliveries/drain` does the same for admins. Each retry re-opens the secret envelope and re-runs `validateSafeUrl` plus DNS re-check on the live target URL. After `max_attempts` (default 5) the row becomes `failed`. Drain batch size, concurrency, and per-mailbox fanout are capped so one bad hook cannot DoS the Worker. Same `(mailbox_id, delivery_key)` is not posted twice while `sent` / `failed`.
 
 ```bash
 # after owner login cookie
@@ -352,7 +353,9 @@ curl -sS -b /tmp/pg-cookies http://127.0.0.1:8787/api/hooks/attempts
 curl -sS -H 'Authorization: Bearer change-me-local-admin-token' \
   'http://127.0.0.1:8787/admin/hooks?mailbox_id=11111111-1111-4111-8111-111111111111'
 curl -sS -H 'Authorization: Bearer change-me-local-admin-token' \
-  http://127.0.0.1:8787/admin/deliveries
+  'http://127.0.0.1:8787/admin/deliveries?status=pending'
+curl -sS -X POST -H 'Authorization: Bearer change-me-local-admin-token' \
+  http://127.0.0.1:8787/admin/webhook-deliveries/drain
 ```
 
 Internal/metadata save is **400**:
@@ -672,7 +675,7 @@ Remote Workers + Email Routing is a one-path operator checklist (D1, R2, `RATE_L
 
 | Path | Role |
 |------|------|
-| `src/index.ts` | Worker `fetch` + `email` handlers |
+| `src/index.ts` | Worker `fetch` + `email` + `scheduled` (webhook delivery drain) handlers |
 | `src/auth.ts` | Owner session + member session + admin bearer/cookie; `requireOwner` / `requireAdmin` |
 | `src/rest.ts` | Token REST `/api/v1` + aliases + public signup + admin mint + `/api/v1/dev/inboxes` |
 | `src/dev-inbox.ts` | Ephemeral own-domain inbox create / wait / close |
@@ -701,7 +704,7 @@ Remote Workers + Email Routing is a one-path operator checklist (D1, R2, `RATE_L
 | `src/outbound.ts` | Pluggable outbound adapters (`stub` / `resend` / `http`); `assertOutboundHttpUrl` for a future Settings save |
 | `src/safe-url.ts` | SSRF guard + shared `recheckResolvedIps` (webhooks / forward / logo) |
 | `docs/PRODUCTION_AUTH.md` | Production: member+admin default; `OWNER_TOKEN` break-glass; rotate/revoke; outbound URL gate |
-| `src/webhooks.ts` | Inbound signed webhook + forward; secret enveloped at rest; `validateSafeUrl` on save/fetch/redirect |
+| `src/webhooks.ts` | Inbound signed webhook + forward; secret enveloped at rest; retry + cron drain; `validateSafeUrl` on save/fetch/redirect/retry |
 | `src/send.ts` | Outbox send: pending + idempotency key, then provider + Sent row |
 | `migrations/0001_init.sql` | D1 `mailboxes` + `messages` |
 | `migrations/0002_message_body.sql` | `messages.body_text` |
@@ -720,12 +723,13 @@ Remote Workers + Email Routing is a one-path operator checklist (D1, R2, `RATE_L
 | `migrations/0015_outbound_outbox.sql` | `outbound_attempts` pending + idempotency_key + retry columns |
 | `migrations/0016_messages_fts.sql` | `messages_fts` FTS5 index + sync triggers + backfill |
 | `migrations/0017_message_thread_id.sql` | Persist `messages.thread_id` + `(mailbox_id, thread_id, received_at)` |
+| `migrations/0018_webhook_delivery_retry.sql` | `inbound_deliveries` pending + delivery_key + retry / drain columns |
 | `scripts/seed-local.sql` | Local sample mailboxes + messages (not for remote) |
 | `scripts/seed-grove-note.txt` | Local sample attachment bytes |
 | `test/helpers/memory-d1.ts` | Shared in-memory D1 / R2 for unit tests |
 | `test/fixtures/mime/` | Malicious / odd inbound MIME samples |
 | `scripts/smoke-local.sh` | S1–S5 / S8 curl pack (`npm run smoke:local` after `wrangler dev`) |
-| `wrangler.jsonc` | Worker + D1 + R2 + `RATE_LIMIT` KV bindings (placeholders) |
+| `wrangler.jsonc` | Worker + D1 + R2 + `RATE_LIMIT` KV bindings (placeholders) + cron drain |
 | `.dev.vars.example` | Local secret / outbound / attachment-cap / Turnstile / REST limit template |
 | `docs/openapi.yaml` | OpenAPI 3 contract for `/api/v1` + admin mint + dev inboxes |
 | `docs/API.md` | Short REST examples (curl) |

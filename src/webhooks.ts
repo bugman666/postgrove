@@ -12,11 +12,17 @@
  * Delivery opens the envelope and HMAC-signs with the plaintext. verifyWebhookSignature
  * compares the hex MAC in constant time. Leftover plaintext rows wrap on read/save.
  *
- * Save, fetch, and each redirect hop call validateSafeUrl from src/safe-url.ts.
- * Hostnames are re-checked after DNS via recheckResolvedIps (shared with logo probe).
- * Default: https only. http://127.0.0.1 (and other private http) only when
- * ALLOW_PRIVATE_WEBHOOKS=1 (passed as allowPrivate). Redirects are followed
- * manually — never redirect: "follow".
+ * Save, fetch, each redirect hop, and **each retry** call validateSafeUrl
+ * from src/safe-url.ts. Hostnames are re-checked after DNS via recheckResolvedIps
+ * (shared with logo probe). Default: https only. http://127.0.0.1 (and other
+ * private http) only when ALLOW_PRIVATE_WEBHOOKS=1 (passed as allowPrivate).
+ * Redirects are followed manually — never redirect: "follow".
+ *
+ * Failed HTTP deliveries stay `pending` with next_attempt_at backoff until
+ * max_attempts, then `failed`. A Worker cron (and admin drain) re-opens the
+ * secret envelope, re-validates the live target URL, and mints a **fresh**
+ * X-Postgrove-Timestamp (skew stays WEBHOOK_MAX_SKEW_SECONDS). Receivers
+ * dedupe on delivery_id / event_id — retries do not replay an old signed body.
  */
 
 import type { Env } from "./env.ts";
@@ -27,7 +33,13 @@ import {
   type ValidateSafeUrlResult,
 } from "./safe-url.ts";
 import { parseSendFields, sendOutbound } from "./send.ts";
-import { getMailbox, parseMailboxAddress, type MailboxRecord } from "./store.ts";
+import {
+  getMailbox,
+  getMailboxMessage,
+  isUniqueConstraintError,
+  parseMailboxAddress,
+  type MailboxRecord,
+} from "./store.ts";
 
 export const WEBHOOK_SIGNATURE_HEADER = "x-postgrove-signature";
 export const WEBHOOK_TIMESTAMP_HEADER = "x-postgrove-timestamp";
@@ -37,6 +49,13 @@ export const WEBHOOK_SIGNED_STRING = "${timestamp}.${raw_json_body}";
 export const WEBHOOK_MAX_SKEW_SECONDS = 5 * 60;
 export const WEBHOOK_MAX_REDIRECTS = 5;
 export const WEBHOOK_BODY_TEXT_MAX = 8000;
+/** Limited automatic retries (first attempt + scheduled drain). */
+export const WEBHOOK_MAX_ATTEMPTS = 5;
+export const WEBHOOK_RETRY_BASE_MS = 60_000;
+export const WEBHOOK_DRAIN_BATCH = 20;
+export const WEBHOOK_DRAIN_CONCURRENCY = 4;
+export const WEBHOOK_DRAIN_PER_MAILBOX = 3;
+export const WEBHOOK_DRAIN_LEASE_MS = 120_000;
 /** AES-GCM envelope prefix. Legacy plaintext rows are wrapped on read/save. */
 export const WEBHOOK_SECRET_ENVELOPE_PREFIX = "enc:v1:";
 const WEBHOOK_SECRET_WRAP_INFO = "postgrove.webhook_secret.v1";
@@ -65,18 +84,49 @@ export type InboundHookRow = {
   updated_at: number;
 };
 
+export type InboundDeliveryStatus = "pending" | "sent" | "failed";
+export type InboundDeliveryChannel = "webhook" | "forward_url" | "forward_email";
+
 export type InboundDeliveryRecord = {
   id: string;
   mailbox_id: string;
   message_id: string | null;
   kind: "webhook" | "forward";
+  channel: InboundDeliveryChannel;
   target: string;
-  status: "sent" | "failed";
+  status: InboundDeliveryStatus;
   http_status: number | null;
   error: string | null;
   hint: string | null;
+  delivery_key: string;
+  attempt_count: number;
+  max_attempts: number;
+  next_attempt_at: number | null;
+  last_attempt_at: number | null;
+  payload_json: string | null;
   created_at: number;
+  updated_at: number;
 };
+
+export type WebhookDrainResult = {
+  scanned: number;
+  claimed: number;
+  sent: number;
+  failed: number;
+  pending: number;
+  skipped: number;
+};
+
+export type DrainWebhookOptions = {
+  now?: number;
+  limit?: number;
+  concurrency?: number;
+  perMailbox?: number;
+};
+
+const DELIVERY_COLUMNS = `id, mailbox_id, message_id, kind, channel, target, status,
+  http_status, error, hint, delivery_key, attempt_count, max_attempts,
+  next_attempt_at, last_attempt_at, payload_json, created_at, updated_at`;
 
 export type PublicHookConfig = {
   mailbox_id: string;
@@ -170,13 +220,58 @@ export function publicDelivery(row: InboundDeliveryRecord) {
     mailbox_id: row.mailbox_id,
     message_id: row.message_id,
     kind: row.kind,
+    channel: row.channel,
     target: row.target,
     status: row.status,
     http_status: row.http_status,
     error: row.error,
     hint: row.hint,
+    delivery_key: row.delivery_key,
+    attempt_count: row.attempt_count,
+    max_attempts: row.max_attempts,
+    next_attempt_at: row.next_attempt_at,
+    last_attempt_at: row.last_attempt_at,
     created_at: row.created_at,
+    updated_at: row.updated_at,
   };
+}
+
+export function parseDeliveryStatus(
+  raw: string | null | undefined,
+): InboundDeliveryStatus | null {
+  if (raw == null) {
+    return null;
+  }
+  const value = raw.trim().toLowerCase();
+  if (!value) {
+    return null;
+  }
+  if (value === "pending" || value === "sent" || value === "failed") {
+    return value;
+  }
+  throw new HookInputError(
+    "invalid_request",
+    "status must be pending, sent, or failed.",
+  );
+}
+
+export function deliveryKeyFor(channel: InboundDeliveryChannel, messageId: string): string {
+  if (channel === "webhook") {
+    return `webhook:${messageId}`;
+  }
+  if (channel === "forward_url") {
+    return `forward:url:${messageId}`;
+  }
+  return `forward:email:${messageId}`;
+}
+
+export function kindForChannel(channel: InboundDeliveryChannel): "webhook" | "forward" {
+  return channel === "webhook" ? "webhook" : "forward";
+}
+
+export function webhookRetryDelayMs(attemptCount: number): number {
+  const n = Math.min(Math.max(Math.floor(attemptCount), 1), 8);
+  return WEBHOOK_RETRY_BASE_MS * 2 ** (n - 1);
 }
 
 export function parseHookConfigBody(body: unknown): HookConfigInput {
@@ -404,11 +499,24 @@ export async function listDeliveries(
   env: Env,
   mailboxId?: string,
   limit = 50,
+  status?: InboundDeliveryStatus | null,
 ): Promise<InboundDeliveryRecord[]> {
   const capped = Math.min(200, Math.max(1, Math.floor(limit)));
+  if (mailboxId && status) {
+    const rows = await env.DB.prepare(
+      `SELECT ${DELIVERY_COLUMNS}
+       FROM inbound_deliveries
+       WHERE mailbox_id = ?1 AND status = ?2
+       ORDER BY created_at DESC
+       LIMIT ?3`,
+    )
+      .bind(mailboxId, status, capped)
+      .all<InboundDeliveryRecord>();
+    return rows.results ?? [];
+  }
   if (mailboxId) {
     const rows = await env.DB.prepare(
-      `SELECT id, mailbox_id, message_id, kind, target, status, http_status, error, hint, created_at
+      `SELECT ${DELIVERY_COLUMNS}
        FROM inbound_deliveries
        WHERE mailbox_id = ?1
        ORDER BY created_at DESC
@@ -418,8 +526,20 @@ export async function listDeliveries(
       .all<InboundDeliveryRecord>();
     return rows.results ?? [];
   }
+  if (status) {
+    const rows = await env.DB.prepare(
+      `SELECT ${DELIVERY_COLUMNS}
+       FROM inbound_deliveries
+       WHERE status = ?1
+       ORDER BY created_at DESC
+       LIMIT ?2`,
+    )
+      .bind(status, capped)
+      .all<InboundDeliveryRecord>();
+    return rows.results ?? [];
+  }
   const rows = await env.DB.prepare(
-    `SELECT id, mailbox_id, message_id, kind, target, status, http_status, error, hint, created_at
+    `SELECT ${DELIVERY_COLUMNS}
      FROM inbound_deliveries
      ORDER BY created_at DESC
      LIMIT ?1`,
@@ -429,46 +549,139 @@ export async function listDeliveries(
   return rows.results ?? [];
 }
 
+export async function getDeliveryByKey(
+  env: Env,
+  mailboxId: string,
+  deliveryKey: string,
+): Promise<InboundDeliveryRecord | null> {
+  return env.DB.prepare(
+    `SELECT ${DELIVERY_COLUMNS}
+     FROM inbound_deliveries
+     WHERE mailbox_id = ?1 AND delivery_key = ?2`,
+  )
+    .bind(mailboxId, deliveryKey)
+    .first<InboundDeliveryRecord>();
+}
+
+export async function getDeliveryById(
+  env: Env,
+  id: string,
+): Promise<InboundDeliveryRecord | null> {
+  return env.DB.prepare(
+    `SELECT ${DELIVERY_COLUMNS}
+     FROM inbound_deliveries
+     WHERE id = ?1`,
+  )
+    .bind(id)
+    .first<InboundDeliveryRecord>();
+}
+
 export async function insertDelivery(
   env: Env,
-  row: Omit<InboundDeliveryRecord, "id" | "created_at"> & { id?: string; created_at?: number },
+  row: Partial<InboundDeliveryRecord> &
+    Pick<InboundDeliveryRecord, "mailbox_id" | "kind" | "target" | "status">,
 ): Promise<InboundDeliveryRecord> {
+  const now = row.created_at ?? Date.now();
+  const id = row.id ?? crypto.randomUUID();
+  const channel = row.channel ?? (row.kind === "webhook" ? "webhook" : "forward_url");
   const record: InboundDeliveryRecord = {
-    id: row.id ?? crypto.randomUUID(),
+    id,
     mailbox_id: row.mailbox_id,
-    message_id: row.message_id,
+    message_id: row.message_id ?? null,
     kind: row.kind,
+    channel,
     target: row.target,
     status: row.status,
-    http_status: row.http_status,
-    error: row.error,
-    hint: row.hint,
-    created_at: row.created_at ?? Date.now(),
+    http_status: row.http_status ?? null,
+    error: row.error ?? null,
+    hint: row.hint ?? null,
+    delivery_key: row.delivery_key ?? id,
+    attempt_count: row.attempt_count ?? 0,
+    max_attempts: row.max_attempts ?? WEBHOOK_MAX_ATTEMPTS,
+    next_attempt_at: row.next_attempt_at ?? null,
+    last_attempt_at: row.last_attempt_at ?? null,
+    payload_json: row.payload_json ?? null,
+    created_at: now,
+    updated_at: row.updated_at ?? now,
   };
+  try {
+    await persistDeliveryRow(env, record);
+    return record;
+  } catch (error) {
+    if (!isUniqueConstraintError(error)) {
+      throw error;
+    }
+    const existing = await getDeliveryByKey(env, record.mailbox_id, record.delivery_key);
+    if (!existing) {
+      throw error;
+    }
+    return existing;
+  }
+}
+
+async function persistDeliveryRow(env: Env, record: InboundDeliveryRecord): Promise<void> {
   await env.DB.prepare(
     `INSERT INTO inbound_deliveries (
-       id, mailbox_id, message_id, kind, target, status, http_status, error, hint, created_at
-     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)`,
+       id, mailbox_id, message_id, kind, channel, target, status, http_status,
+       error, hint, delivery_key, attempt_count, max_attempts, next_attempt_at,
+       last_attempt_at, payload_json, created_at, updated_at
+     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)`,
   )
     .bind(
       record.id,
       record.mailbox_id,
       record.message_id,
       record.kind,
+      record.channel,
       record.target,
       record.status,
       record.http_status,
       record.error,
       record.hint,
+      record.delivery_key,
+      record.attempt_count,
+      record.max_attempts,
+      record.next_attempt_at,
+      record.last_attempt_at,
+      record.payload_json,
       record.created_at,
+      record.updated_at,
     )
     .run();
-  return record;
 }
 
-export function inboundWebhookPayload(input: InboundNotifyInput): Record<string, unknown> {
+export async function updateDelivery(env: Env, row: InboundDeliveryRecord): Promise<void> {
+  await env.DB.prepare(
+    `UPDATE inbound_deliveries
+     SET target = ?2, status = ?3, http_status = ?4, error = ?5, hint = ?6,
+         attempt_count = ?7, next_attempt_at = ?8, last_attempt_at = ?9,
+         payload_json = ?10, updated_at = ?11
+     WHERE id = ?1`,
+  )
+    .bind(
+      row.id,
+      row.target,
+      row.status,
+      row.http_status,
+      row.error,
+      row.hint,
+      row.attempt_count,
+      row.next_attempt_at,
+      row.last_attempt_at,
+      row.payload_json,
+      row.updated_at,
+    )
+    .run();
+}
+
+export function inboundWebhookPayload(
+  input: InboundNotifyInput,
+  ids?: { deliveryId?: string; eventId?: string },
+): Record<string, unknown> {
   return {
     event: "inbound",
+    event_id: ids?.eventId ?? input.messageId,
+    delivery_id: ids?.deliveryId ?? input.messageId,
     message_id: input.messageId,
     mailbox_id: input.mailboxId,
     from: input.from,
@@ -544,7 +757,9 @@ export async function verifyWebhookSignature(input: {
 }
 
 /**
- * POST signed inbound payload / chat forward. Failures are stored; never swallowed.
+ * POST signed inbound payload / chat forward. Writes `pending` with a
+ * delivery_key before the first POST (outbox-style). Failures stay pending
+ * with backoff until max_attempts, then failed. Never swallowed.
  */
 export async function notifyInbound(env: Env, input: InboundNotifyInput): Promise<InboundDeliveryRecord[]> {
   let config: InboundHookRow | null = null;
@@ -559,110 +774,264 @@ export async function notifyInbound(env: Env, input: InboundNotifyInput): Promis
     return [];
   }
 
+  const now = Date.now();
   const out: InboundDeliveryRecord[] = [];
   if (config.webhook_enabled === 1 && config.webhook_url) {
-    out.push(await deliverWebhook(env, config, input));
+    out.push(await deliverChannel(env, config, input, "webhook", now));
   }
   if (config.forward_enabled === 1 && config.forward_url) {
-    out.push(await deliverForwardUrl(env, config, input));
+    out.push(await deliverChannel(env, config, input, "forward_url", now));
   }
   if (config.forward_enabled === 1 && config.forward_email) {
-    out.push(await deliverForwardEmail(env, config, input));
+    out.push(await deliverChannel(env, config, input, "forward_email", now));
   }
   return out;
 }
 
-async function deliverWebhook(
+/**
+ * Drain due `pending` rows. Caps batch size, per-mailbox fanout, and
+ * concurrent POSTs so one bad hook cannot DoS the Worker.
+ */
+/** Cron / admin / test entry for the pending delivery drain. */
+export async function handleScheduled(
   env: Env,
-  config: InboundHookRow,
-  input: InboundNotifyInput,
-): Promise<InboundDeliveryRecord> {
-  const rawBody = JSON.stringify(inboundWebhookPayload(input));
-  let secret = "";
-  if (config.webhook_secret) {
-    try {
-      secret = await openWebhookSecret(env, config.webhook_secret);
-    } catch {
-      return insertDelivery(env, {
-        mailbox_id: input.mailboxId,
-        message_id: input.messageId,
-        kind: "webhook",
-        target: redactTarget(config.webhook_url ?? ""),
-        status: "failed",
-        http_status: null,
-        error: "secret_unreadable",
-        hint: "Stored webhook secret could not be opened. Rotate the hook secret (SESSION_SECRET may have changed).",
-      });
+  opts: DrainWebhookOptions = {},
+): Promise<WebhookDrainResult> {
+  return drainDueWebhookDeliveries(env, opts);
+}
+
+export async function drainDueWebhookDeliveries(
+  env: Env,
+  opts: DrainWebhookOptions = {},
+): Promise<WebhookDrainResult> {
+  const now = opts.now ?? Date.now();
+  const limit = Math.min(
+    WEBHOOK_DRAIN_BATCH,
+    Math.max(1, Math.floor(opts.limit ?? WEBHOOK_DRAIN_BATCH)),
+  );
+  const perMailbox = Math.min(
+    WEBHOOK_DRAIN_PER_MAILBOX,
+    Math.max(1, Math.floor(opts.perMailbox ?? WEBHOOK_DRAIN_PER_MAILBOX)),
+  );
+  const concurrency = Math.min(
+    WEBHOOK_DRAIN_CONCURRENCY,
+    Math.max(1, Math.floor(opts.concurrency ?? WEBHOOK_DRAIN_CONCURRENCY)),
+  );
+
+  const due = await listDueDeliveries(env, now, limit * 3);
+  const selected = capPerMailbox(due, perMailbox).slice(0, limit);
+  const result: WebhookDrainResult = {
+    scanned: due.length,
+    claimed: 0,
+    sent: 0,
+    failed: 0,
+    pending: 0,
+    skipped: 0,
+  };
+
+  const claimed: InboundDeliveryRecord[] = [];
+  for (const row of selected) {
+    const leased = await claimDelivery(env, row, now);
+    if (leased) {
+      claimed.push(leased);
+    } else {
+      result.skipped += 1;
     }
   }
-  const signed = secret ? await signWebhookBody(secret, rawBody) : null;
+  result.claimed = claimed.length;
+
+  await runPool(claimed, concurrency, async (row) => {
+    const updated = await retryClaimedDelivery(env, row, now);
+    if (updated.status === "sent") {
+      result.sent += 1;
+    } else if (updated.status === "failed") {
+      result.failed += 1;
+    } else {
+      result.pending += 1;
+    }
+  });
+
+  return result;
+}
+
+async function deliverChannel(
+  env: Env,
+  config: InboundHookRow,
+  input: InboundNotifyInput,
+  channel: InboundDeliveryChannel,
+  now: number,
+): Promise<InboundDeliveryRecord> {
+  const reserved = await reserveDelivery(env, config, input, channel, now);
+  if (reserved.status === "sent" || reserved.status === "failed") {
+    return reserved;
+  }
+  if (reserved.attempt_count > 0) {
+    return reserved;
+  }
+  return dispatchDelivery(env, reserved, config, input, now);
+}
+
+async function reserveDelivery(
+  env: Env,
+  config: InboundHookRow,
+  input: InboundNotifyInput,
+  channel: InboundDeliveryChannel,
+  now: number,
+): Promise<InboundDeliveryRecord> {
+  const key = deliveryKeyFor(channel, input.messageId);
+  const existing = await getDeliveryByKey(env, input.mailboxId, key);
+  if (existing) {
+    return existing;
+  }
+  return insertDelivery(env, {
+    mailbox_id: input.mailboxId,
+    message_id: input.messageId,
+    kind: kindForChannel(channel),
+    channel,
+    target: redactTarget(liveTarget(config, channel)),
+    status: "pending",
+    http_status: null,
+    error: null,
+    hint: null,
+    delivery_key: key,
+    attempt_count: 0,
+    max_attempts: WEBHOOK_MAX_ATTEMPTS,
+    next_attempt_at: now,
+    last_attempt_at: null,
+    payload_json: JSON.stringify(input),
+    created_at: now,
+    updated_at: now,
+  });
+}
+
+async function retryClaimedDelivery(
+  env: Env,
+  row: InboundDeliveryRecord,
+  now: number,
+): Promise<InboundDeliveryRecord> {
+  const input = await notifyInputFromDelivery(env, row);
+  if (!input) {
+    row.status = "failed";
+    row.error = "payload_missing";
+    row.hint = "Delivery snapshot was missing and the inbound message could not be reloaded. This is not retried.";
+    row.next_attempt_at = null;
+    row.last_attempt_at = now;
+    row.updated_at = now;
+    await updateDelivery(env, row);
+    return row;
+  }
+
+  let config: InboundHookRow | null = null;
+  try {
+    config = await getHookConfig(env, row.mailbox_id);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "unknown";
+    return finishAttempt(env, row, now, {
+      target: row.target,
+      httpStatus: null,
+      error: "hook_unreadable",
+      hint: `Could not reload hook config for retry. ${detail}`,
+    });
+  }
+  if (!config || !channelEnabled(config, row.channel)) {
+    row.status = "failed";
+    row.error = "hook_disabled";
+    row.hint = "Hook was disabled or the target was removed before retry. Delivery stopped.";
+    row.next_attempt_at = null;
+    row.last_attempt_at = now;
+    row.updated_at = now;
+    await updateDelivery(env, row);
+    return row;
+  }
+  return dispatchDelivery(env, row, config, input, now);
+}
+
+async function dispatchDelivery(
+  env: Env,
+  row: InboundDeliveryRecord,
+  config: InboundHookRow,
+  input: InboundNotifyInput,
+  now: number,
+): Promise<InboundDeliveryRecord> {
+  row.attempt_count += 1;
+  row.last_attempt_at = now;
+  row.updated_at = now;
+  row.next_attempt_at = now + WEBHOOK_DRAIN_LEASE_MS;
+  row.target = redactTarget(liveTarget(config, row.channel));
+  await updateDelivery(env, row);
+
+  if (row.channel === "forward_email") {
+    return dispatchForwardEmail(env, row, config, input, now);
+  }
+  return dispatchHttpChannel(env, row, config, input, now);
+}
+
+async function dispatchHttpChannel(
+  env: Env,
+  row: InboundDeliveryRecord,
+  config: InboundHookRow,
+  input: InboundNotifyInput,
+  now: number,
+): Promise<InboundDeliveryRecord> {
+  const targetUrl = liveTarget(config, row.channel);
+  const ids = { deliveryId: row.id, eventId: row.delivery_key };
+  let rawBody: string;
   const headers: Record<string, string> = {
     "content-type": "application/json",
-    [WEBHOOK_EVENT_HEADER]: "inbound",
   };
-  if (signed) {
+
+  if (row.channel === "webhook") {
+    rawBody = JSON.stringify(inboundWebhookPayload(input, ids));
+    headers[WEBHOOK_EVENT_HEADER] = "inbound";
+    let secret = "";
+    if (config.webhook_secret) {
+      try {
+        secret = await openWebhookSecret(env, config.webhook_secret);
+      } catch {
+        return finishAttempt(env, row, now, {
+          target: redactTarget(targetUrl),
+          httpStatus: null,
+          error: "secret_unreadable",
+          hint: "Stored webhook secret could not be opened. Rotate the hook secret (SESSION_SECRET may have changed).",
+        });
+      }
+    }
+    if (!secret) {
+      return finishAttempt(env, row, now, {
+        target: redactTarget(targetUrl),
+        httpStatus: null,
+        error: "missing_secret",
+        hint: "Webhook is enabled but no signing secret is stored. Rotate or set webhook_secret.",
+      });
+    }
+    const signed = await signWebhookBody(secret, rawBody, Math.floor(now / 1000));
     headers[WEBHOOK_TIMESTAMP_HEADER] = signed.timestamp;
     headers[WEBHOOK_SIGNATURE_HEADER] = signed.signature;
+  } else {
+    rawBody = JSON.stringify(inboundForwardPayload(input, ids));
   }
-  const result = await safeOutboundFetch(config.webhook_url ?? "", {
-    method: "POST",
-    headers,
-    body: rawBody,
-  }, { allowPrivate: allowPrivateWebhooks(env) });
-  return persistHttpDelivery(env, {
-    mailboxId: input.mailboxId,
-    messageId: input.messageId,
-    kind: "webhook",
-    target: redactTarget(config.webhook_url ?? ""),
-    result,
-  });
+
+  const result = await safeOutboundFetch(
+    targetUrl,
+    { method: "POST", headers, body: rawBody },
+    { allowPrivate: allowPrivateWebhooks(env) },
+  );
+  return applyHttpResult(env, row, now, redactTarget(targetUrl), result);
 }
 
-async function deliverForwardUrl(
+async function dispatchForwardEmail(
   env: Env,
+  row: InboundDeliveryRecord,
   config: InboundHookRow,
   input: InboundNotifyInput,
-): Promise<InboundDeliveryRecord> {
-  const text = chatText(input);
-  const rawBody = JSON.stringify({
-    event: "inbound.forward",
-    text,
-    content: text,
-    from: input.from,
-    to: input.to,
-    subject: input.subject,
-    snippet: input.snippet,
-    message_id: input.messageId,
-  });
-  const result = await safeOutboundFetch(config.forward_url ?? "", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: rawBody,
-  }, { allowPrivate: allowPrivateWebhooks(env) });
-  return persistHttpDelivery(env, {
-    mailboxId: input.mailboxId,
-    messageId: input.messageId,
-    kind: "forward",
-    target: redactTarget(config.forward_url ?? ""),
-    result,
-  });
-}
-
-async function deliverForwardEmail(
-  env: Env,
-  config: InboundHookRow,
-  input: InboundNotifyInput,
+  now: number,
 ): Promise<InboundDeliveryRecord> {
   const target = config.forward_email ?? "";
   const mailbox = await getMailbox(env, input.mailboxId);
   if (!mailbox) {
-    return insertDelivery(env, {
-      mailbox_id: input.mailboxId,
-      message_id: input.messageId,
-      kind: "forward",
+    return finishAttempt(env, row, now, {
       target,
-      status: "failed",
-      http_status: null,
+      httpStatus: null,
       error: "mailbox_missing",
       hint: "Forward mailbox disappeared before the relay ran.",
     });
@@ -673,89 +1042,268 @@ async function deliverForwardEmail(
     text: quotedForward(input, mailbox),
   });
   if (!parsed.ok) {
-    return insertDelivery(env, {
-      mailbox_id: input.mailboxId,
-      message_id: input.messageId,
-      kind: "forward",
+    return finishAttempt(env, row, now, {
       target,
-      status: "failed",
-      http_status: 400,
+      httpStatus: 400,
       error: parsed.error,
       hint: parsed.hint,
     });
   }
   try {
-    const outcome = await sendOutbound(env, mailbox, parsed.input);
-    return insertDelivery(env, {
-      mailbox_id: input.mailboxId,
-      message_id: input.messageId,
-      kind: "forward",
+    const outcome = await sendOutbound(env, mailbox, parsed.input, {
+      idempotencyKey: `hook:${row.delivery_key}`,
+    });
+    if (outcome.attempt.status === "sent") {
+      return finishAttempt(env, row, now, {
+        target,
+        httpStatus: outcome.httpStatus,
+        error: null,
+        hint: null,
+        sent: true,
+      });
+    }
+    return finishAttempt(env, row, now, {
       target,
-      status: outcome.attempt.status === "sent" ? "sent" : "failed",
-      http_status: outcome.httpStatus,
+      httpStatus: outcome.httpStatus,
       error: outcome.attempt.error,
       hint: outcome.attempt.hint,
     });
   } catch (error) {
     const detail = error instanceof Error ? error.message : "unknown";
-    return insertDelivery(env, {
-      mailbox_id: input.mailboxId,
-      message_id: input.messageId,
-      kind: "forward",
+    return finishAttempt(env, row, now, {
       target,
-      status: "failed",
-      http_status: null,
+      httpStatus: null,
       error: "forward_failed",
       hint: `Could not relay to ${target}. ${detail}`,
     });
   }
 }
 
-async function persistHttpDelivery(
+async function applyHttpResult(
   env: Env,
-  input: {
-    mailboxId: string;
-    messageId: string;
-    kind: "webhook" | "forward";
-    target: string;
-    result: SafeFetchResult;
-  },
+  row: InboundDeliveryRecord,
+  now: number,
+  target: string,
+  result: SafeFetchResult,
 ): Promise<InboundDeliveryRecord> {
-  if (input.result.ok) {
-    const status = input.result.response.status;
+  if (result.ok) {
+    const status = result.response.status;
     if (status >= 200 && status < 300) {
-      return insertDelivery(env, {
-        mailbox_id: input.mailboxId,
-        message_id: input.messageId,
-        kind: input.kind,
-        target: input.target,
-        status: "sent",
-        http_status: status,
+      return finishAttempt(env, row, now, {
+        target,
+        httpStatus: status,
         error: null,
         hint: null,
+        sent: true,
       });
     }
-    return insertDelivery(env, {
-      mailbox_id: input.mailboxId,
-      message_id: input.messageId,
-      kind: input.kind,
-      target: input.target,
-      status: "failed",
-      http_status: status,
+    return finishAttempt(env, row, now, {
+      target,
+      httpStatus: status,
       error: "downstream_failed",
       hint: `Downstream returned HTTP ${status}. Check the webhook/forward URL; this is not swallowed.`,
     });
   }
-  return insertDelivery(env, {
-    mailbox_id: input.mailboxId,
-    message_id: input.messageId,
-    kind: input.kind,
-    target: input.target,
-    status: "failed",
-    http_status: input.result.httpStatus ?? null,
-    error: input.result.error,
-    hint: input.result.hint,
+  return finishAttempt(env, row, now, {
+    target,
+    httpStatus: result.httpStatus ?? null,
+    error: result.error,
+    hint: result.hint,
   });
+}
+
+async function finishAttempt(
+  env: Env,
+  row: InboundDeliveryRecord,
+  now: number,
+  outcome: {
+    target: string;
+    httpStatus: number | null;
+    error: string | null;
+    hint: string | null;
+    sent?: boolean;
+  },
+): Promise<InboundDeliveryRecord> {
+  row.target = outcome.target;
+  row.http_status = outcome.httpStatus;
+  row.error = outcome.error;
+  row.hint = outcome.hint;
+  row.last_attempt_at = now;
+  row.updated_at = now;
+  if (outcome.sent) {
+    row.status = "sent";
+    row.next_attempt_at = null;
+  } else if (row.attempt_count >= row.max_attempts) {
+    row.status = "failed";
+    row.next_attempt_at = null;
+  } else {
+    row.status = "pending";
+    row.next_attempt_at = now + webhookRetryDelayMs(row.attempt_count);
+  }
+  await updateDelivery(env, row);
+  return row;
+}
+
+async function listDueDeliveries(
+  env: Env,
+  now: number,
+  limit: number,
+): Promise<InboundDeliveryRecord[]> {
+  const capped = Math.min(200, Math.max(1, Math.floor(limit)));
+  const rows = await env.DB.prepare(
+    `SELECT ${DELIVERY_COLUMNS}
+     FROM inbound_deliveries
+     WHERE status = 'pending' AND next_attempt_at IS NOT NULL AND next_attempt_at <= ?1
+     ORDER BY next_attempt_at ASC
+     LIMIT ?2`,
+  )
+    .bind(now, capped)
+    .all<InboundDeliveryRecord>();
+  return rows.results ?? [];
+}
+
+async function claimDelivery(
+  env: Env,
+  row: InboundDeliveryRecord,
+  now: number,
+): Promise<InboundDeliveryRecord | null> {
+  const leaseUntil = now + WEBHOOK_DRAIN_LEASE_MS;
+  const result = await env.DB.prepare(
+    `UPDATE inbound_deliveries
+     SET next_attempt_at = ?2, updated_at = ?3
+     WHERE id = ?1 AND status = 'pending' AND next_attempt_at <= ?3`,
+  )
+    .bind(row.id, leaseUntil, now)
+    .run();
+  if ((result.meta?.changes ?? 0) === 0) {
+    return null;
+  }
+  row.next_attempt_at = leaseUntil;
+  row.updated_at = now;
+  return row;
+}
+
+async function notifyInputFromDelivery(
+  env: Env,
+  row: InboundDeliveryRecord,
+): Promise<InboundNotifyInput | null> {
+  if (row.payload_json) {
+    try {
+      const parsed = JSON.parse(row.payload_json) as Record<string, unknown>;
+      if (typeof parsed.mailboxId === "string" && typeof parsed.messageId === "string") {
+        return {
+          mailboxId: parsed.mailboxId,
+          mailboxAddress: typeof parsed.mailboxAddress === "string" ? parsed.mailboxAddress : "",
+          messageId: parsed.messageId,
+          from: typeof parsed.from === "string" ? parsed.from : "",
+          to: typeof parsed.to === "string" ? parsed.to : "",
+          subject: typeof parsed.subject === "string" ? parsed.subject : null,
+          snippet: typeof parsed.snippet === "string" ? parsed.snippet : null,
+          text: typeof parsed.text === "string" ? parsed.text : null,
+          receivedAt: typeof parsed.receivedAt === "number" ? parsed.receivedAt : row.created_at,
+        };
+      }
+    } catch {
+      // Fall through to the stored message row.
+    }
+  }
+  if (!row.message_id) {
+    return null;
+  }
+  const message = await getMailboxMessage(env, row.mailbox_id, row.message_id);
+  if (!message) {
+    return null;
+  }
+  const mailbox = await getMailbox(env, row.mailbox_id);
+  return {
+    mailboxId: row.mailbox_id,
+    mailboxAddress: mailbox?.address ?? message.envelope_to,
+    messageId: message.id,
+    from: message.envelope_from,
+    to: message.envelope_to,
+    subject: message.subject,
+    snippet: message.snippet,
+    text: message.body_text,
+    receivedAt: message.received_at,
+  };
+}
+
+function inboundForwardPayload(
+  input: InboundNotifyInput,
+  ids: { deliveryId: string; eventId: string },
+): Record<string, unknown> {
+  const text = chatText(input);
+  return {
+    event: "inbound.forward",
+    event_id: ids.eventId,
+    delivery_id: ids.deliveryId,
+    text,
+    content: text,
+    from: input.from,
+    to: input.to,
+    subject: input.subject,
+    snippet: input.snippet,
+    message_id: input.messageId,
+  };
+}
+
+function liveTarget(config: InboundHookRow, channel: InboundDeliveryChannel): string {
+  if (channel === "webhook") {
+    return config.webhook_url ?? "";
+  }
+  if (channel === "forward_url") {
+    return config.forward_url ?? "";
+  }
+  return config.forward_email ?? "";
+}
+
+function channelEnabled(config: InboundHookRow, channel: InboundDeliveryChannel): boolean {
+  if (channel === "webhook") {
+    return config.webhook_enabled === 1 && Boolean(config.webhook_url);
+  }
+  if (channel === "forward_url") {
+    return config.forward_enabled === 1 && Boolean(config.forward_url);
+  }
+  return config.forward_enabled === 1 && Boolean(config.forward_email);
+}
+
+function capPerMailbox(
+  rows: InboundDeliveryRecord[],
+  perMailbox: number,
+): InboundDeliveryRecord[] {
+  const counts = new Map<string, number>();
+  const out: InboundDeliveryRecord[] = [];
+  for (const row of rows) {
+    const used = counts.get(row.mailbox_id) ?? 0;
+    if (used >= perMailbox) {
+      continue;
+    }
+    counts.set(row.mailbox_id, used + 1);
+    out.push(row);
+  }
+  return out;
+}
+
+async function runPool<T>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T) => Promise<void>,
+): Promise<void> {
+  if (items.length === 0) {
+    return;
+  }
+  const queue = items.slice();
+  const n = Math.min(concurrency, queue.length);
+  await Promise.all(
+    Array.from({ length: n }, async () => {
+      while (queue.length > 0) {
+        const item = queue.shift();
+        if (item) {
+          await worker(item);
+        }
+      }
+    }),
+  );
 }
 
 export type SafeFetchResult =

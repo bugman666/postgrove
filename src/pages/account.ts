@@ -128,14 +128,23 @@ export function renderSettingsPage(
   const deliveryItems = deliveries.length
     ? `<ul class="attempt-list">${deliveries
         .map((row) => {
-          const status = row.status === "sent" ? "已送达" : `失败 · ${row.error || "downstream_failed"}`;
-          return `<li class="attempt${row.status === "failed" ? " selected" : ""}">
+          const status = row.status === "sent"
+            ? "已送达"
+            : row.status === "pending"
+              ? `待重试 · ${row.error || "pending"}`
+              : `失败 · ${row.error || "downstream_failed"}`;
+          const attempts = `${row.attempt_count ?? 0}/${row.max_attempts ?? 5}`;
+          const next = row.status === "pending" && row.next_attempt_at
+            ? `下次 ${formatReceived(row.next_attempt_at)}`
+            : "";
+          return `<li class="attempt${row.status === "failed" || row.status === "pending" ? " selected" : ""}">
             <div class="attempt-top">
               <span class="attempt-status ${row.status}">${escapeHtml(status)}</span>
               <time>${escapeHtml(formatReceived(row.created_at))}</time>
             </div>
             <div>种类 ${escapeHtml(row.kind === "webhook" ? "webhook" : "转发")}</div>
             <div>目标 <span class="mono">${escapeHtml(row.target)}</span></div>
+            <div>尝试 ${escapeHtml(attempts)}${next ? ` · ${escapeHtml(next)}` : ""}</div>
             ${row.http_status ? `<div>HTTP ${row.http_status}</div>` : ""}
             ${row.hint ? `<p class="attempt-hint">${escapeHtml(row.hint)}</p>` : ""}
           </li>`;
