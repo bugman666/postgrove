@@ -9,6 +9,7 @@ import type { ParsedAttachment } from "./mime.ts";
 
 export {
   attachmentLimits,
+  attachmentStoreFailedHint,
   checkAttachmentLimits,
   DEFAULT_ATTACHMENT_MAX_BYTES,
   DEFAULT_ATTACHMENT_MAX_COUNT,
@@ -163,41 +164,105 @@ export async function persistInboundAttachments(
   }
 
   const stored: AttachmentRecord[] = [];
-  for (const file of files) {
-    const id = crypto.randomUUID();
-    const key = r2Key(mailboxId, messageId, id, file.filename);
-    await env.ATTACHMENTS.put(key, file.bytes, {
-      httpMetadata: { contentType: safeDownloadType(file.contentType) },
-    });
-    const row: AttachmentRecord = {
-      id,
-      message_id: messageId,
-      mailbox_id: mailboxId,
-      filename: file.filename,
-      content_type: file.contentType,
-      size_bytes: file.bytes.byteLength,
-      r2_key: key,
-      created_at: now,
-    };
-    await env.DB.prepare(
-      `INSERT INTO attachments (
-         id, message_id, mailbox_id, filename, content_type, size_bytes, r2_key, created_at
-       ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)`,
-    )
-      .bind(
-        row.id,
-        row.message_id,
-        row.mailbox_id,
-        row.filename,
-        row.content_type,
-        row.size_bytes,
-        row.r2_key,
-        row.created_at,
+  let pendingKey: string | null = null;
+  try {
+    for (const file of files) {
+      const id = crypto.randomUUID();
+      const key = r2Key(mailboxId, messageId, id, file.filename);
+      pendingKey = key;
+      await env.ATTACHMENTS.put(key, file.bytes, {
+        httpMetadata: { contentType: safeDownloadType(file.contentType) },
+      });
+      const row: AttachmentRecord = {
+        id,
+        message_id: messageId,
+        mailbox_id: mailboxId,
+        filename: file.filename,
+        content_type: file.contentType,
+        size_bytes: file.bytes.byteLength,
+        r2_key: key,
+        created_at: now,
+      };
+      await env.DB.prepare(
+        `INSERT INTO attachments (
+           id, message_id, mailbox_id, filename, content_type, size_bytes, r2_key, created_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)`,
       )
-      .run();
-    stored.push(row);
+        .bind(
+          row.id,
+          row.message_id,
+          row.mailbox_id,
+          row.filename,
+          row.content_type,
+          row.size_bytes,
+          row.r2_key,
+          row.created_at,
+        )
+        .run();
+      stored.push(row);
+      pendingKey = null;
+    }
+    return stored;
+  } catch (error) {
+    await discardInboundAttachmentWrites(env, stored, pendingKey);
+    throw error;
   }
-  return stored;
+}
+
+/** Best-effort undo of R2 objects + attachment rows after a persist failure. */
+export async function discardInboundAttachmentWrites(
+  env: Env,
+  rows: AttachmentRecord[],
+  pendingKey: string | null = null,
+): Promise<void> {
+  const keys = new Set(rows.map((row) => row.r2_key));
+  if (pendingKey) {
+    keys.add(pendingKey);
+  }
+  for (const key of keys) {
+    try {
+      await env.ATTACHMENTS?.delete(key);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "unknown";
+      console.log("inbound stub: attachment r2 rollback failed", { key, detail });
+    }
+  }
+  for (const row of rows) {
+    try {
+      await env.DB.prepare(`DELETE FROM attachments WHERE id = ?1`).bind(row.id).run();
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "unknown";
+      console.log("inbound stub: attachment row rollback failed", { id: row.id, detail });
+    }
+  }
+}
+
+/**
+ * Drop the inbound message row and any leftover attachment writes so a
+ * rejected persist cannot leave a body without files (or block a retry via
+ * UNIQUE rfc_message_id).
+ */
+export async function discardInboundMessageWrites(
+  env: Env,
+  mailboxId: string,
+  messageId: string,
+): Promise<void> {
+  let leftover: AttachmentRecord[] = [];
+  try {
+    leftover = await listMessageAttachments(env, mailboxId, messageId);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "unknown";
+    console.log("inbound stub: attachment leftover lookup failed", { messageId, detail });
+  }
+  await discardInboundAttachmentWrites(env, leftover);
+  try {
+    await env.DB.prepare(`DELETE FROM messages WHERE id = ?1 AND mailbox_id = ?2`)
+      .bind(messageId, mailboxId)
+      .run();
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "unknown";
+    console.log("inbound stub: message rollback failed", { messageId, detail });
+  }
 }
 
 export async function listMessageAttachments(

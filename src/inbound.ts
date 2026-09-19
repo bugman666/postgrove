@@ -1,7 +1,7 @@
 import { resolveInboundMailbox } from "./aliases.ts";
 import type { Env, InboundEmail } from "./env.ts";
-import { inboundAttachmentRejection } from "./attachment-limits.ts";
-import { persistInboundAttachments } from "./attachments.ts";
+import { attachmentStoreFailedHint, inboundAttachmentRejection } from "./attachment-limits.ts";
+import { discardInboundMessageWrites, persistInboundAttachments } from "./attachments.ts";
 import { extractAttachments, extractBodies } from "./mime.ts";
 import { inboundStorageRejection } from "./quotas.ts";
 import { rejectClosedDevInbox } from "./dev-inbox.ts";
@@ -121,6 +121,11 @@ export async function handleInbound(message: InboundEmail, env: Env): Promise<vo
     } catch (error) {
       const detail = error instanceof Error ? error.message : "unknown";
       console.log("inbound stub: attachment store failed", { messageId, detail });
+      // Same fail-loud path as limit / missing-R2 rejects: bounce the sender
+      // and drop the D1 row so a retry is not swallowed as a duplicate.
+      await discardInboundMessageWrites(env, mailboxId, messageId);
+      message.setReject(attachmentStoreFailedHint());
+      return;
     }
   }
 
