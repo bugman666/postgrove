@@ -1,0 +1,17 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "postgrove",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-19",
+  // Replace the database_id after `npx wrangler d1 create postgrove`.
+  // Local `wrangler dev` and `--local` migrations use preview_database_id.
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "postgrove",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "preview_database_id": "postgrove-local",
+      "migrations_dir": "migrations"
+    }
+  ]
+}
