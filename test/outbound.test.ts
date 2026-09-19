@@ -29,7 +29,7 @@ function env(overrides: Partial<Env> = {}): Env {
   };
 }
 
-test("resolveOutboundAdapter: unset fails loud", () => {
+test("TC6.5 resolveOutboundAdapter: unset fails loud", () => {
   const resolved = resolveOutboundAdapter(env({ OUTBOUND_PROVIDER: "" }));
   assert.equal(resolved.ok, false);
   if (!resolved.ok) {

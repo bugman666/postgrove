@@ -146,8 +146,9 @@ function minusSelf(addresses: string[], selfAddress: string): string[] {
 
 /**
  * Reply: To = Reply-To or From.
- * Reply-all: To = Reply-To/From + original To (minus self);
- *            Cc = original Cc minus self and anyone already in To.
+ * Reply-all: To = sender/Reply-To + original To + original Cc
+ * (deduped, mailbox address removed). Cc stays empty so the
+ * prefill matches a single recipient field.
  */
 export function replyRecipients(
   message: ReplySource,
@@ -165,13 +166,14 @@ export function replyRecipients(
   const headerTo = extractAddresses(message.header_to);
   const originalTo = headerTo.length > 0 ? headerTo : extractAddresses(message.envelope_to);
   const headerCc = extractAddresses(message.header_cc);
-
-  const to = minusSelf(uniqueAddresses([...primary, ...originalTo]), selfAddress);
-  const cc = minusSelf(headerCc, selfAddress).filter((address) => !to.includes(address));
+  const to = minusSelf(
+    uniqueAddresses([...primary, ...originalTo, ...headerCc]),
+    selfAddress,
+  );
   if (to.length === 0) {
-    return { to: primary, cc };
+    return { to: primary, cc: [] };
   }
-  return { to, cc };
+  return { to, cc: [] };
 }
 
 function quoteBody(body: string | null | undefined): string {

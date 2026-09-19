@@ -200,7 +200,7 @@ INSERT OR IGNORE INTO messages (
   '本地种子：多人 To/Cc，用来核对全部回复的收件人。',
   '本地种子：多人 To/Cc，用来核对全部回复的收件人。
 
-回复应收 To=lead@grove.test；全部回复还应带上 teammate 与 notes，并去掉自己。',
+回复应收 To=lead@grove.test；全部回复的 To 还应带上 teammate 与 notes，并去掉自己。',
   'inbox@example.test, teammate@grove.test',
   'notes@grove.test',
   NULL,

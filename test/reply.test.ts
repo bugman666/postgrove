@@ -42,7 +42,7 @@ test("extractAddresses pulls unique lowercase emails from a header", () => {
   assert.deepEqual(extractAddresses(null), []);
 });
 
-test("reply prefills To=sender, Re: subject, and In-Reply-To/References", () => {
+test("TC6.1 reply prefills To=sender, Re: subject, and In-Reply-To/References", () => {
   const draft = buildComposePrefill(source(), SELF, "reply");
   assert.equal(draft.mode, "reply");
   assert.equal(draft.to, "lead@grove.test");
@@ -67,16 +67,19 @@ test("reply uses Reply-To when present and does not double Re:", () => {
   assert.equal(draft.subject, "Re: 本周同步");
 });
 
-test("reply-all includes original To/Cc minus self", () => {
+test("TC6.2 reply-all To is sender + original To/Cc, deduped, minus self", () => {
   const recipients = replyRecipients(source(), SELF, true);
-  assert.deepEqual(recipients.to, ["lead@grove.test", "teammate@grove.test"]);
-  assert.deepEqual(recipients.cc, ["notes@grove.test"]);
+  assert.deepEqual(recipients.to, [
+    "lead@grove.test",
+    "teammate@grove.test",
+    "notes@grove.test",
+  ]);
+  assert.deepEqual(recipients.cc, []);
 
   const draft = buildComposePrefill(source(), SELF, "reply-all");
-  assert.equal(draft.to, "lead@grove.test, teammate@grove.test");
-  assert.equal(draft.cc, "notes@grove.test");
+  assert.equal(draft.to, "lead@grove.test, teammate@grove.test, notes@grove.test");
+  assert.equal(draft.cc, "");
   assert.ok(!draft.to.includes(SELF));
-  assert.ok(!draft.cc.includes(SELF));
 });
 
 test("reply-all without stored To/Cc falls back to sender only", () => {
@@ -92,7 +95,7 @@ test("reply-all without stored To/Cc falls back to sender only", () => {
   assert.equal(draft.cc, "");
 });
 
-test("forward prefills Fwd: subject and original headers/body", () => {
+test("TC6.3 forward prefills Fwd: subject and original headers/body", () => {
   const draft = buildComposePrefill(source(), SELF, "forward");
   assert.equal(draft.mode, "forward");
   assert.equal(draft.to, "");
@@ -141,7 +144,19 @@ test("parseRecipientList accepts comma-separated addresses", () => {
   assert.equal(bad.ok, false);
 });
 
-test("compose prefill / send share requireOwner — missing cookie is 401", async () => {
+test("TC6.4 prefill is a draft the sender can edit before send", () => {
+  const draft = buildComposePrefill(source(), SELF, "reply");
+  assert.equal(draft.to, "lead@grove.test");
+  assert.equal(draft.subject, "Re: 本周同步");
+  draft.to = "other@grove.test";
+  draft.subject = "changed";
+  draft.body = "my reply\n" + draft.body;
+  assert.equal(draft.to, "other@grove.test");
+  assert.equal(draft.subject, "changed");
+  assert.match(draft.body, /my reply/);
+});
+
+test("TC6.6 compose prefill / send share requireOwner — missing cookie is 401", async () => {
   const env = {
     DB: {} as D1Database,
     SESSION_SECRET: "change-me-local-session-secret",
