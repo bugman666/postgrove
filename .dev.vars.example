@@ -1,0 +1,5 @@
+# Copy to `.dev.vars` for local Wrangler secrets.
+# `.dev.vars` is gitignored. Do not commit real credentials.
+
+# Reserved for a later outbound send provider. Unused in this scaffold.
+# SEND_PROVIDER_KEY=
