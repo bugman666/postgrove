@@ -478,3 +478,43 @@ INSERT OR IGNORE INTO attachments (
   'attachments/11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222224/33333333-3333-4333-8333-333333333331/grove-note.txt',
   1789816200000
 );
+
+-- Mailbox member for empty@example.test (token = change-me-local-user-token).
+-- Hash is SHA-256(salt + ":" + token). Not used remotely.
+INSERT OR IGNORE INTO users (
+  id,
+  login,
+  display_name,
+  role,
+  status,
+  token_salt,
+  token_hash,
+  quota_addresses,
+  quota_storage_bytes,
+  quota_send_daily,
+  created_at,
+  updated_at
+) VALUES (
+  '44444444-4444-4444-8444-444444444441',
+  'grove',
+  'Grove member',
+  'mailbox',
+  'active',
+  'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+  '0d9fa095f9fe59e2231dea53a87cd93cdb5e67b55bffb5d31ad2a933d4a0eef8',
+  3,
+  10485760,
+  20,
+  1789815602000,
+  1789815602000
+);
+
+INSERT OR IGNORE INTO user_mailboxes (
+  user_id,
+  mailbox_id,
+  created_at
+) VALUES (
+  '44444444-4444-4444-8444-444444444441',
+  '11111111-1111-4111-8111-111111111112',
+  1789815602000
+);

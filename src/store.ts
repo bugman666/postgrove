@@ -143,6 +143,85 @@ export async function getMailbox(
     .first<MailboxRecord>();
 }
 
+export async function createMailbox(
+  env: Env,
+  input: { address: string; displayName?: string | null },
+  now = Date.now(),
+): Promise<MailboxRecord> {
+  const parsed = parseMailboxAddress(input.address);
+  if (!parsed) {
+    throw new MailboxInputError(
+      "invalid_address",
+      "Address must look like local@domain.tld.",
+    );
+  }
+  const existing = await getMailbox(env, parsed.address);
+  if (existing) {
+    throw new MailboxInputError("address_taken", "That address is already in this grove.");
+  }
+  const row: MailboxRecord = {
+    id: crypto.randomUUID(),
+    address: parsed.address,
+    local_part: parsed.localPart,
+    domain: parsed.domain,
+    display_name: input.displayName?.trim() || null,
+    status: "active",
+  };
+  await env.DB.prepare(
+    `INSERT INTO mailboxes (
+       id, address, local_part, domain, display_name, status, created_at, updated_at
+     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)`,
+  )
+    .bind(
+      row.id,
+      row.address,
+      row.local_part,
+      row.domain,
+      row.display_name,
+      row.status,
+      now,
+      now,
+    )
+    .run();
+  return row;
+}
+
+export async function setMailboxStatus(
+  env: Env,
+  mailboxId: string,
+  status: "active" | "disabled",
+  now = Date.now(),
+): Promise<MailboxRecord | null> {
+  const result = await env.DB.prepare(
+    `UPDATE mailboxes SET status = ?2, updated_at = ?3 WHERE id = ?1`,
+  )
+    .bind(mailboxId, status, now)
+    .run();
+  if ((result.meta.changes ?? 0) === 0) {
+    return null;
+  }
+  return getMailbox(env, mailboxId);
+}
+
+export async function listMailboxesForUser(env: Env, userId: string): Promise<MailboxRecord[]> {
+  const rows = await env.DB.prepare(
+    `SELECT ${MAILBOX_COLUMNS} FROM mailboxes
+     WHERE id IN (SELECT mailbox_id FROM user_mailboxes WHERE user_id = ?1)
+     ORDER BY created_at ASC, address ASC`,
+  )
+    .bind(userId)
+    .all<MailboxRecord>();
+  return rows.results ?? [];
+}
+
+export class MailboxInputError extends Error {
+  error: string;
+  constructor(error: string, hint: string) {
+    super(hint);
+    this.error = error;
+  }
+}
+
 export async function defaultMailbox(env: Env): Promise<MailboxRecord | null> {
   return env.DB.prepare(
     `SELECT ${MAILBOX_COLUMNS} FROM mailboxes

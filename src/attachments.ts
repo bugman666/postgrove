@@ -1,5 +1,7 @@
 import type { Env } from "./env";
 import { requireOwner } from "./auth";
+import { mailboxAllowed } from "./users.ts";
+import { getMailbox } from "./store.ts";
 import { formatBytes, missingR2Hint } from "./attachment-limits";
 import { escapeHtml } from "./html";
 import { json, methodNotAllowed, notFoundJson, forbiddenJson } from "./http";
@@ -112,7 +114,8 @@ export async function downloadAttachment(
   if (!row) {
     return notFoundJson();
   }
-  if (row.mailbox_id !== gate.principal.mailboxId) {
+  const mailbox = await getMailbox(env, row.mailbox_id);
+  if (!mailbox || !mailboxAllowed(gate.principal, mailbox)) {
     return forbiddenJson();
   }
   if (!env.ATTACHMENTS) {

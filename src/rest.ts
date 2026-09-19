@@ -9,7 +9,7 @@ import {
   revokeApiToken,
   type ApiTokenRecord,
 } from "./api-tokens.ts";
-import { bearerToken, requireAdmin, type AdminPrincipal, type OwnerPrincipal } from "./auth.ts";
+import { bearerToken, requireAdmin, type AdminPrincipal, type MailboxActor } from "./auth.ts";
 import type { Env } from "./env.ts";
 import { parseFolder } from "./folders.ts";
 import {
@@ -79,8 +79,8 @@ export async function handleRestRoutes(request: Request, env: Env): Promise<Resp
       : methodNotAllowed("POST");
   }
 
-  if (path === "/admin/mailboxes") {
-    return request.method === "POST" ? adminCreateMailbox(request, env) : methodNotAllowed("POST");
+  if (path === "/admin/mailboxes" && request.method === "POST") {
+    return adminCreateMailbox(request, env);
   }
   if (path === "/admin/tokens") {
     if (request.method === "GET") {
@@ -242,7 +242,7 @@ async function requireRestAuth(request: Request, env: Env): Promise<AuthResult<R
     };
   }
 
-  const admin = requireAdmin(request, env);
+  const admin = await requireAdmin(request, env);
   if (admin.ok) {
     return admin;
   }
@@ -477,7 +477,7 @@ async function handlePublicSignup(request: Request, env: Env): Promise<Response>
 }
 
 async function adminCreateMailbox(request: Request, env: Env): Promise<Response> {
-  const gate = requireAdmin(request, env);
+  const gate = await requireAdmin(request, env);
   if (!gate.ok) {
     return gate.response;
   }
@@ -485,7 +485,7 @@ async function adminCreateMailbox(request: Request, env: Env): Promise<Response>
 }
 
 async function adminMintToken(request: Request, env: Env): Promise<Response> {
-  const gate = requireAdmin(request, env);
+  const gate = await requireAdmin(request, env);
   if (!gate.ok) {
     return gate.response;
   }
@@ -504,7 +504,7 @@ async function adminMintToken(request: Request, env: Env): Promise<Response> {
 }
 
 async function adminListTokens(request: Request, env: Env, url: URL): Promise<Response> {
-  const gate = requireAdmin(request, env);
+  const gate = await requireAdmin(request, env);
   if (!gate.ok) {
     return gate.response;
   }
@@ -524,7 +524,7 @@ async function adminListTokens(request: Request, env: Env, url: URL): Promise<Re
 }
 
 async function adminRevokeToken(request: Request, env: Env, tokenId: string): Promise<Response> {
-  const gate = requireAdmin(request, env);
+  const gate = await requireAdmin(request, env);
   if (!gate.ok) {
     return gate.response;
   }
@@ -544,7 +544,7 @@ export async function handleOwnerTokenRoutes(
   request: Request,
   env: Env,
   url: URL,
-  owner: OwnerPrincipal,
+  owner: MailboxActor,
 ): Promise<Response | null> {
   const path = url.pathname;
   if (path === "/api/tokens") {
