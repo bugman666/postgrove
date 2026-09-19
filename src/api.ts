@@ -1,15 +1,18 @@
 import type { Env } from "./env";
 import { requireOwner, type OwnerPrincipal } from "./auth";
 import { forbiddenJson, json, methodNotAllowed, notFoundJson } from "./http";
+import { parseSendFields, sendOutbound } from "./send";
 import {
   getInboxMessage,
   getMailbox,
   getMessageById,
   listInboxMessages,
+  listOutboundAttempts,
   markRead,
   trashMessage,
   type MailboxRecord,
   type MessageRecord,
+  type OutboundAttemptRecord,
 } from "./store";
 
 export async function handleApi(
@@ -25,6 +28,29 @@ export async function handleApi(
   const path = url.pathname;
   const method = request.method;
   const owner = gate.principal;
+
+  if (path === "/api/send") {
+    if (method !== "POST") {
+      return methodNotAllowed("POST");
+    }
+    return sendMessage(request, env, owner);
+  }
+
+  if (path === "/api/outbound/attempts") {
+    if (method !== "GET") {
+      return methodNotAllowed("GET");
+    }
+    const mailbox = await getMailbox(env, owner.mailboxId);
+    if (!mailbox) {
+      return notFoundJson();
+    }
+    const attempts = await listOutboundAttempts(env, mailbox.id);
+    return json({
+      ok: true,
+      mailbox: publicMailbox(mailbox),
+      attempts: attempts.map(publicAttempt),
+    });
+  }
 
   if (path === "/api/mailboxes") {
     if (method !== "GET") {
@@ -71,6 +97,73 @@ export async function handleApi(
   }
 
   return notFoundJson();
+}
+
+async function sendMessage(
+  request: Request,
+  env: Env,
+  owner: OwnerPrincipal,
+): Promise<Response> {
+  const mailbox = await getMailbox(env, owner.mailboxId);
+  if (!mailbox) {
+    return notFoundJson();
+  }
+
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return json(
+      {
+        ok: false,
+        error: "invalid_request",
+        hint: "Send JSON { \"to\", \"subject\", \"text\" }.",
+      },
+      400,
+    );
+  }
+  if (!body || typeof body !== "object") {
+    return json(
+      {
+        ok: false,
+        error: "invalid_request",
+        hint: "Send JSON { \"to\", \"subject\", \"text\" }.",
+      },
+      400,
+    );
+  }
+
+  const parsed = parseSendFields(body as Record<string, unknown>);
+  if (!parsed.ok) {
+    return json({ ok: false, error: parsed.error, hint: parsed.hint }, 400);
+  }
+
+  const outcome = await sendOutbound(env, mailbox, parsed.input);
+  return json(
+    {
+      ok: outcome.attempt.status === "sent",
+      attempt: publicAttempt(outcome.attempt),
+      error: outcome.attempt.error,
+      hint: outcome.attempt.hint,
+    },
+    outcome.httpStatus,
+  );
+}
+
+function publicAttempt(row: OutboundAttemptRecord) {
+  return {
+    id: row.id,
+    mailbox_id: row.mailbox_id,
+    from: row.from_address,
+    to: row.to_address,
+    subject: row.subject,
+    provider: row.provider,
+    status: row.status,
+    error: row.error,
+    hint: row.hint,
+    provider_message_id: row.provider_message_id,
+    created_at: row.created_at,
+  };
 }
 
 async function readMessage(

@@ -12,6 +12,7 @@ Open addresses on a domain you own, receive mail at the edge, read it in a web i
 - **Edge-first** — Cloudflare Workers + D1 + R2 + Email Routing
 - **Small surface** — create address → receive → read → send
 - **Honest scope** — no fake “enterprise suite”; roadmap stays visible
+- **Pluggable send** — stub for local/dev, Resend or a generic HTTP hook for real delivery
 
 ## Planned MVP
 
@@ -26,7 +27,7 @@ Open addresses on a domain you own, receive mail at the edge, read it in a web i
 - Throwaway / anonymous mailboxes
 - Calendar, contacts, or replacing a full IMAP/SMTP stack
 - Real reply / reply-all / forward (the inbox shows a reply entry only)
-- Compose + outbound provider
+- Attachments on send
 - Multi-user / RBAC / per-address passwords (one shared `OWNER_TOKEN` until then)
 
 ## Stack (intended)
@@ -55,7 +56,7 @@ See Issues under milestones `P0-MVP` … `P3-dev-api`. Longer write-ups: [produc
 
 ## Status
 
-P0 inbox on the Worker: list / read / delete against D1, plus a small web UI behind the owner session. Reply and compose are visible stubs only (no send).
+P0 inbox on the Worker: list / read / delete against D1, plus compose/send behind the owner session. Outbound is pluggable (`stub` / `resend` / `http`). Reply is a visible entry only (no send).
 
 ## Local development
 
@@ -64,7 +65,7 @@ Requires Node.js 18.17+ (20+ recommended). No Cloudflare account is needed for t
 ```bash
 npm install
 npm run check                    # tsc --noEmit; same command as CI
-cp .dev.vars.example .dev.vars   # local SESSION_SECRET, OWNER_TOKEN, ADMIN_TOKEN
+cp .dev.vars.example .dev.vars   # local SESSION_SECRET, OWNER_TOKEN, ADMIN_TOKEN, OUTBOUND_PROVIDER=stub
 npm run db:migrate:local
 npm run db:seed:local            # sample mailboxes + messages (local only)
 npm run dev
@@ -90,7 +91,7 @@ Direct links (same origin as `wrangler dev`):
 - Inbox with mail: [http://127.0.0.1:8787/box/11111111-1111-4111-8111-111111111111](http://127.0.0.1:8787/box/11111111-1111-4111-8111-111111111111)
 - Empty box: [http://127.0.0.1:8787/box/11111111-1111-4111-8111-111111111112](http://127.0.0.1:8787/box/11111111-1111-4111-8111-111111111112)
 
-Open a row to read the body. An unread row becomes read. Delete moves the row to `trash` (it leaves the inbox list; there is no trash folder UI yet). The **回复** control only shows a placeholder — it does not send mail.
+Open a row to read the body. An unread row becomes read. Delete moves the row to `trash` (it leaves the inbox list; there is no trash folder UI yet). The **回复** control only shows a placeholder — it does not send mail. **写信** is a real form (to / subject / body). With `OUTBOUND_PROVIDER=stub` (the example `.dev.vars`) a submit records the attempt in D1 and does not leave the box.
 
 JSON against the same seeded rows (cookie from `POST /auth/login`):
 
@@ -111,7 +112,33 @@ curl -sS http://127.0.0.1:8787/healthz
 
 Expect JSON with `"ok": true` and `"db": "ready"` after migrations. A `503` with `"migrations_pending"` means the local D1 schema has not been applied.
 
-`GET /healthz` stays public (no session). The Email Routing handler is also unauthenticated — Cloudflare calls it, not a browser.
+`GET /healthz` stays public (no session). After this milestone it also expects the `outbound_attempts` table (`npm run db:migrate:local`). The Email Routing handler is also unauthenticated — Cloudflare calls it, not a browser.
+
+### Compose and outbound
+
+`GET`/`POST /compose` and `POST /api/send` call `requireOwner` (same session cookie as Inbox, including the Origin/Referer check on POST). Without a session they return **401** (HTML login page for `/compose`, JSON `unauthorized` + hint for `/api/send`).
+
+Local example uses `OUTBOUND_PROVIDER=stub`: the adapter records the attempt and returns success without sending. Real providers fail **loud** when config is missing or the key is rejected — the row is stored as `failed` and the compose page shows the error plus the next step.
+
+| Env | Role |
+|-----|------|
+| `OUTBOUND_PROVIDER` | `stub` · `resend` · `http`. Unset → send fails with an actionable hint |
+| `RESEND_API_KEY` | Required for `resend` |
+| `RESEND_FROM` | Optional From override (verified domain) |
+| `OUTBOUND_HTTP_URL` | Required for `http` (POST JSON `{from,to,subject,text}`) |
+| `OUTBOUND_HTTP_TOKEN` | Optional Bearer for the HTTP hook |
+| `OUTBOUND_FROM` | Optional From override for any provider |
+
+```bash
+# stub success (after login cookie)
+curl -sS -b /tmp/pg-cookies -X POST http://127.0.0.1:8787/api/send \
+  -H 'content-type: application/json' \
+  -d '{"to":"neighbor@example.test","subject":"hello","text":"from local stub"}'
+
+curl -sS -b /tmp/pg-cookies http://127.0.0.1:8787/api/outbound/attempts
+```
+
+Open [http://127.0.0.1:8787/compose](http://127.0.0.1:8787/compose) while signed in to use the form. Recent attempts (including failures) stay on that page.
 
 ### Auth (mailbox owner session + admin bearer)
 
@@ -151,7 +178,7 @@ curl -i -c /tmp/pg-cookies -X POST http://127.0.0.1:8787/auth/logout
 
 **Rotate `SESSION_SECRET` to revoke sessions.** Logout only deletes the cookie in that browser. Tokens are HMAC-signed and are not stored on the server, so they stay valid until expiry (7 days) if someone copied the cookie. To revoke every owner session: put a new `SESSION_SECRET` (`npx wrangler secret put SESSION_SECRET`, or edit `.dev.vars` locally) and redeploy / restart Wrangler. Old cookies fail verify. `OWNER_TOKEN` / `ADMIN_TOKEN` do not rotate sessions; change those when the secret leaked, then rotate `SESSION_SECRET` as well.
 
-**CSRF (cookie + SameSite=Lax + Origin check).** The session cookie is `HttpOnly`, `SameSite=Lax`, and `Secure` on HTTPS. Cross-site form POSTs therefore do not send it on modern browsers. Cookie-authenticated writes (`POST /auth/logout`, inbox delete, `DELETE /api/messages/…`, anything else that calls `requireOwner` with POST/PUT/PATCH/DELETE) also require `Origin` (or `Referer` if `Origin` is missing) to match this Worker. Same-origin HTML forms and `fetch` already send `Origin`, so the inbox UI did not need a rewrite. Missing both headers is allowed for curl and scripts. That is enough for this MVP.
+**CSRF (cookie + SameSite=Lax + Origin check).** The session cookie is `HttpOnly`, `SameSite=Lax`, and `Secure` on HTTPS. Cross-site form POSTs therefore do not send it on modern browsers. Cookie-authenticated writes (`POST /auth/logout`, inbox delete, `POST /compose`, `POST /api/send`, `DELETE /api/messages/…`, anything else that calls `requireOwner` with POST/PUT/PATCH/DELETE) also require `Origin` (or `Referer` if `Origin` is missing) to match this Worker. Same-origin HTML forms and `fetch` already send `Origin`, so the inbox and compose UI did not need a rewrite. Missing both headers is allowed for curl and scripts. That is enough for this MVP.
 
 Still open for P2: a required custom header or double-submit token (so missing-`Origin` clients cannot be used as a CSRF hole), CSRF on GET side effects (mark-as-read), per-address passwords, and an expiring admin bearer.
 
@@ -202,6 +229,9 @@ npm run db:migrate:remote
 npx wrangler secret put SESSION_SECRET
 npx wrangler secret put OWNER_TOKEN
 npx wrangler secret put ADMIN_TOKEN
+# when sending for real:
+# npx wrangler secret put RESEND_API_KEY
+# set OUTBOUND_PROVIDER=resend as a Worker var (or http + OUTBOUND_HTTP_URL)
 npx wrangler deploy
 ```
 
@@ -215,10 +245,13 @@ Then, in the Cloudflare dashboard, enable Email Routing for your domain and add 
 | `src/auth.ts` | Owner session + admin bearer; `requireOwner` / `requireAdmin` |
 | `src/health.ts` | `GET /healthz` |
 | `src/inbound.ts` | Email Routing stub persist |
-| `src/api.ts` | JSON list / read / delete |
-| `src/ui.ts` | Inbox HTML (list / read / stubs) |
+| `src/api.ts` | JSON list / read / delete / send |
+| `src/ui.ts` | Inbox HTML + compose form |
+| `src/outbound.ts` | Pluggable outbound adapters (`stub` / `resend` / `http`) |
+| `src/send.ts` | Validate + persist outbound attempts |
 | `migrations/0001_init.sql` | D1 `mailboxes` + `messages` |
 | `migrations/0002_message_body.sql` | `messages.body_text` |
+| `migrations/0003_outbound_attempts.sql` | D1 `outbound_attempts` |
 | `scripts/seed-local.sql` | Local sample mailboxes + messages (not for remote) |
 | `wrangler.jsonc` | Worker + D1 bindings (placeholders) |
 | `.dev.vars.example` | Local secret template |
