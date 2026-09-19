@@ -225,9 +225,10 @@ function renderReading(
     ? escapeHtml(message.body_text)
     : "（没有正文）";
   const replyHref = `${messagePath(mailbox.id, message.id)}?reply=1`;
+  const composeHref = withMailbox("/compose", mailbox);
   const replyBanner = showReply
-    ? `<p class="banner reply" id="reply-stub">回复能力将在下一阶段开放；你仍可以新建写信。</p>`
-    : `<p class="banner reply" id="reply-stub" hidden>回复能力将在下一阶段开放；你仍可以新建写信。</p>`;
+    ? `<p class="banner reply">回复能力将在下一阶段开放；你仍可以<a href="${escapeHtml(composeHref)}">新建写信</a>。</p>`
+    : "";
 
   return `<div class="read-inner">
     <a class="back" href="${escapeHtml(boxPath(mailbox.id))}">← 收件箱</a>
@@ -241,7 +242,7 @@ function renderReading(
         <div>时间 ${escapeHtml(formatReceived(message.received_at))}</div>
       </div>
       <div class="actions">
-        <a class="btn btn-primary" id="reply-btn" href="${escapeHtml(replyHref)}">回复</a>
+        <a class="btn btn-primary" href="${escapeHtml(replyHref)}">回复</a>
         <form method="post" action="${escapeHtml(`${messagePath(mailbox.id, message.id)}/delete`)}" onsubmit="return confirm('删除后这封信会离开收件箱。确定删除？');">
           <button class="btn btn-danger" type="submit">删除</button>
         </form>
@@ -249,18 +250,7 @@ function renderReading(
       ${replyBanner}
       <pre class="body">${body}</pre>
     </article>
-  </div>
-  <script>
-    (function () {
-      var btn = document.getElementById("reply-btn");
-      var stub = document.getElementById("reply-stub");
-      if (!btn || !stub) return;
-      btn.addEventListener("click", function (event) {
-        event.preventDefault();
-        stub.hidden = false;
-      });
-    })();
-  </script>`;
+  </div>`;
 }
 
 function renderAddressesPage(mailboxes: MailboxRecord[], nav: NavId): string {

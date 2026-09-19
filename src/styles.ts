@@ -403,6 +403,7 @@ input:focus-visible {
 
 .banner.reply {
   border: 1px solid var(--pg-color-border);
+  color: var(--pg-color-text);
 }
 
 .empty {
