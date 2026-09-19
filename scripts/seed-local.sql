@@ -52,6 +52,7 @@ INSERT OR IGNORE INTO messages (
   body_text,
   size_bytes,
   is_read,
+  is_starred,
   folder,
   received_at,
   created_at
@@ -70,6 +71,7 @@ INSERT OR IGNORE INTO messages (
 打开后应保持已读；删除后会离开收件箱（进入垃圾箱，本阶段不提供垃圾箱界面）。',
   220,
   1,
+  1,
   'inbox',
   1789812000000,
   1789812000000
@@ -86,6 +88,7 @@ INSERT OR IGNORE INTO messages (
   body_text,
   size_bytes,
   is_read,
+  is_starred,
   folder,
   received_at,
   created_at
@@ -101,6 +104,7 @@ INSERT OR IGNORE INTO messages (
 
 金额与账号均为虚构，不会产生真实扣款。',
   180,
+  0,
   0,
   'inbox',
   1789813800000,
@@ -118,6 +122,7 @@ INSERT OR IGNORE INTO messages (
   body_text,
   size_bytes,
   is_read,
+  is_starred,
   folder,
   received_at,
   created_at
@@ -133,6 +138,7 @@ INSERT OR IGNORE INTO messages (
 
 这是未读种子信，打开后应变为已读。阅读页的回复会预填写信表单。',
   160,
+  0,
   0,
   'inbox',
   1789815600000,
@@ -150,6 +156,7 @@ INSERT OR IGNORE INTO messages (
   body_text,
   size_bytes,
   is_read,
+  is_starred,
   folder,
   received_at,
   created_at
@@ -165,6 +172,7 @@ INSERT OR IGNORE INTO messages (
 
 下载地址需要主人会话。未登录访问 /attachments/… 应返回 401。',
   240,
+  0,
   0,
   'inbox',
   1789816200000,
@@ -187,6 +195,7 @@ INSERT OR IGNORE INTO messages (
   references_header,
   size_bytes,
   is_read,
+  is_starred,
   folder,
   received_at,
   created_at
@@ -207,6 +216,7 @@ INSERT OR IGNORE INTO messages (
   '<seed-sync-root@example.test>',
   '<seed-sync-root@example.test>',
   220,
+  0,
   0,
   'inbox',
   1789816800000,

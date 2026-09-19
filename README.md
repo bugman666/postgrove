@@ -58,7 +58,7 @@ See Issues under milestones `P0-MVP` … `P3-dev-api`. Longer write-ups: [produc
 
 ## Status
 
-P0 inbox on the Worker: list / read / delete against D1, inbound attachments in R2, plus compose/send behind the owner session. Outbound is pluggable (`stub` / `resend` / `http`). Reply / reply-all / forward prefill compose and send through the same adapters (In-Reply-To / References on reply). Outbound send attachments are a later follow-up. Light-editorial brand art (paper + forest green) lives in [`docs/assets/`](docs/assets/).
+P0 inbox on the Worker: list / read / delete against D1, inbound attachments in R2, plus compose/send behind the owner session. Search (LIKE on from / subject / body), unread toggle with a nav count, and star/flag are in. Outbound is pluggable (`stub` / `resend` / `http`). Reply / reply-all / forward prefill compose and send through the same adapters (In-Reply-To / References on reply). Outbound send attachments are a later follow-up. Light-editorial brand art (paper + forest green) lives in [`docs/assets/`](docs/assets/).
 
 ## Local development
 
@@ -93,7 +93,7 @@ Direct links (same origin as `wrangler dev`):
 - Inbox with mail: [http://127.0.0.1:8787/box/11111111-1111-4111-8111-111111111111](http://127.0.0.1:8787/box/11111111-1111-4111-8111-111111111111)
 - Empty box: [http://127.0.0.1:8787/box/11111111-1111-4111-8111-111111111112](http://127.0.0.1:8787/box/11111111-1111-4111-8111-111111111112)
 
-Open a row to read the body. An unread row becomes read. Delete moves the row to `trash` (it leaves the inbox list; there is no trash folder UI yet). **回复** / **全部回复** / **转发** open `/compose` with the original message prefilled. Reply sets `To` to the sender, `Re:` on the subject, and `In-Reply-To` / `References` from the stored Message-ID chain. Reply-all puts the original sender plus original To/Cc in To (deduped, minus this mailbox). Forward uses `Fwd:` and quotes the original headers/body; you still pick the new recipient. The seeded 「本地附件种子」row lists `grove-note.txt`; the owner session can download it from `/attachments/33333333-3333-4333-8333-333333333331`. **写信** is a real form (to / cc / subject / body). With `OUTBOUND_PROVIDER=stub` (the example `.dev.vars`) a submit records the attempt in D1 and does not leave the box.
+Open a row to read the body. An unread row becomes read; **标为未读** on the reading pane flips it back and the nav unread count updates. **☆ / ★** stars persist in D1. The list search box matches from, subject, and body with SQL `LIKE` (not FTS5). Filter chips: 全部 / 未读 / 星标. Delete moves the row to `trash` (it leaves the inbox list; there is no trash folder UI yet). **回复** / **全部回复** / **转发** open `/compose` with the original message prefilled. Reply sets `To` to the sender, `Re:` on the subject, and `In-Reply-To` / `References` from the stored Message-ID chain. Reply-all puts the original sender plus original To/Cc in To (deduped, minus this mailbox). Forward uses `Fwd:` and quotes the original headers/body; you still pick the new recipient. The seeded 「本地附件种子」row lists `grove-note.txt`; the owner session can download it from `/attachments/33333333-3333-4333-8333-333333333331`. **写信** is a real form (to / cc / subject / body). With `OUTBOUND_PROVIDER=stub` (the example `.dev.vars`) a submit records the attempt in D1 and does not leave the box. The welcome seed row is already starred so the 星标 filter has something to show.
 
 JSON against the same seeded rows (cookie from `POST /auth/login`):
 
@@ -158,6 +158,51 @@ aGVsbG8K
 --bnd--
 '
 ```
+
+### Search, unread, and star
+
+Search uses **SQL `LIKE`** on `envelope_from`, `subject`, and `body_text` (case-insensitive for ASCII). `%` / `_` in the query are escaped. This is not D1 FTS5 — fine for a single-operator inbox; FTS can come later if the corpus grows.
+
+`GET /api/search` and `GET /api/mailboxes/:id/messages` accept `q` and `filter=unread|starred`. Both call `requireOwner`. The JSON includes `engine: "like"` and `unread_count`.
+
+```bash
+# after the login cookie above
+curl -sS -b /tmp/pg-cookies 'http://127.0.0.1:8787/api/search?q=确认码'
+curl -sS -b /tmp/pg-cookies 'http://127.0.0.1:8787/api/search?q=billing@grove.test'
+curl -sS -b /tmp/pg-cookies 'http://127.0.0.1:8787/api/search?q=482193'
+curl -sS -b /tmp/pg-cookies 'http://127.0.0.1:8787/api/search?filter=unread'
+curl -sS -b /tmp/pg-cookies 'http://127.0.0.1:8787/api/search?filter=starred'
+
+curl -sS -b /tmp/pg-cookies -X POST \
+  http://127.0.0.1:8787/api/messages/22222222-2222-4222-8222-222222222223/read \
+  -H 'content-type: application/json' \
+  -d '{"read":true}'
+
+curl -sS -b /tmp/pg-cookies -X POST \
+  http://127.0.0.1:8787/api/messages/22222222-2222-4222-8222-222222222223/read \
+  -H 'content-type: application/json' \
+  -d '{"read":false}'
+
+curl -sS -b /tmp/pg-cookies -X POST \
+  http://127.0.0.1:8787/api/messages/22222222-2222-4222-8222-222222222222/star \
+  -H 'content-type: application/json' \
+  -d '{"starred":true}'
+```
+
+Seeded subjects you can type in the inbox search box: `欢迎使用本地收件箱`, `本月账单已出`, `你的确认码`. Body hit: `482193`. From hit: `billing@grove.test`.
+
+Unauthenticated search / star is **401**:
+
+```bash
+curl -sS -o /dev/stderr -w '%{http_code}\n' \
+  'http://127.0.0.1:8787/api/search?q=确认码'
+curl -sS -o /dev/stderr -w '%{http_code}\n' \
+  -X POST http://127.0.0.1:8787/api/messages/22222222-2222-4222-8222-222222222221/star \
+  -H 'content-type: application/json' \
+  -d '{"starred":true}'
+```
+
+Browser: sign in, use the search box, **未读** in the nav (or the 未读 chip), then **标为未读** / **星标** on a reading pane. Apply `npm run db:migrate:local` so `messages.is_starred` exists.
 
 ### Health
 
@@ -312,9 +357,10 @@ Then, in the Cloudflare dashboard, enable Email Routing for your domain and add 
 | `src/attachment-limits.ts` | Size / count caps and human-readable over-limit errors |
 | `src/attachments.ts` | R2 store / owner download / read-view links |
 | `src/mime.ts` | Plain-text body extract + inbound MIME attachments |
-| `src/api.ts` | JSON list / read / delete / send |
+| `src/api.ts` | JSON list / read / delete / send / search / star |
 | `src/ui.ts` | Inbox HTML + compose / reply / forward form |
 | `src/reply.ts` | Reply / reply-all / forward prefill + header helpers |
+| `src/triage.ts` | Search `LIKE` helpers + unread / star filters |
 | `src/outbound.ts` | Pluggable outbound adapters (`stub` / `resend` / `http`) |
 | `src/send.ts` | Validate + persist outbound attempts |
 | `migrations/0001_init.sql` | D1 `mailboxes` + `messages` |
@@ -322,6 +368,7 @@ Then, in the Cloudflare dashboard, enable Email Routing for your domain and add 
 | `migrations/0003_outbound_attempts.sql` | D1 `outbound_attempts` |
 | `migrations/0004_attachments.sql` | D1 `attachments` metadata (bytes in R2) |
 | `migrations/0005_reply_headers.sql` | Inbound To/Cc/Reply-To/References + outbound attempt headers |
+| `migrations/0006_message_star.sql` | `messages.is_starred` + unread / star indexes |
 | `scripts/seed-local.sql` | Local sample mailboxes + messages (not for remote) |
 | `scripts/seed-grove-note.txt` | Local sample attachment bytes |
 | `wrangler.jsonc` | Worker + D1 + R2 bindings (placeholders) |
