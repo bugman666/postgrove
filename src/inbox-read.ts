@@ -1,8 +1,10 @@
 import { listAttachmentsForMessages, type AttachmentRecord } from "./attachments.ts";
 import type { Env } from "./env.ts";
 import {
+  ensureMailboxThreadIds,
   getMailboxMessagesByIds,
   listInboxMessageHeads,
+  listInboxMessagesByThreadId,
   markMessagesReadLocally,
   markReadMany,
   type MessageRecord,
@@ -10,7 +12,9 @@ import {
 import {
   findThreadById,
   findThreadForMessage,
-  groupMessagesIntoThreads,
+  groupMessagesByStoredThreadId,
+  storedThreadId,
+  threadFromStoredId,
   type MessageThread,
 } from "./threads.ts";
 import type { InboxFilter } from "./triage.ts";
@@ -79,6 +83,36 @@ export function unreadInboxIds(messages: readonly MessageRecord[]): string[] {
     .map((row) => row.id);
 }
 
+function listedHasThread(listed: MessageRecord[], threadId: string): boolean {
+  if (listed.some((row) => storedThreadId(row) === threadId)) {
+    return true;
+  }
+  return Boolean(findThreadById(groupMessagesByStoredThreadId(listed), threadId));
+}
+
+async function loadStoredThread(
+  env: Env,
+  mailboxId: string,
+  threadId: string,
+  allInbox: MessageRecord[],
+  listed: MessageRecord[],
+): Promise<MessageThread | null> {
+  const members = await listInboxMessagesByThreadId(env, mailboxId, threadId);
+  const matching = members.filter((row) => storedThreadId(row) === threadId);
+  if (matching.length > 0) {
+    return threadFromStoredId(threadId, matching);
+  }
+  const fromAll = allInbox.filter((row) => storedThreadId(row) === threadId);
+  if (fromAll.length > 0) {
+    return threadFromStoredId(threadId, fromAll);
+  }
+  const fromListed = listed.filter((row) => storedThreadId(row) === threadId);
+  if (fromListed.length > 0) {
+    return threadFromStoredId(threadId, fromListed);
+  }
+  return null;
+}
+
 export async function openThreadForRead(
   env: Env,
   mailboxId: string,
@@ -90,12 +124,18 @@ export async function openThreadForRead(
   thread: MessageThread | null;
   attachments: AttachmentRecord[];
 }> {
+  await ensureMailboxThreadIds(env, mailboxId);
   const { listed, allInbox } = await loadInboxHeads(env, mailboxId, view);
-  const visible = findThreadById(groupMessagesIntoThreads(listed), threadId);
+  const visible = listedHasThread(listed, threadId);
   if (!visible) {
     return { visible: false, listed, thread: null, attachments: [] };
   }
-  const thread = findThreadById(groupMessagesIntoThreads(allInbox), threadId) ?? visible;
+  const thread = await loadStoredThread(env, mailboxId, threadId, allInbox, listed)
+    ?? findThreadById(groupMessagesByStoredThreadId(allInbox), threadId)
+    ?? findThreadById(groupMessagesByStoredThreadId(listed), threadId);
+  if (!thread) {
+    return { visible: false, listed, thread: null, attachments: [] };
+  }
   const readIds = unreadInboxIds(thread.messages);
   if (readIds.length > 0) {
     await markReadMany(env, mailboxId, readIds);
@@ -129,8 +169,13 @@ export async function openInboxMessageForRead(
   if (!alreadyMarked && readIds.length > 0) {
     await markReadMany(env, mailboxId, readIds);
   }
+  await ensureMailboxThreadIds(env, mailboxId);
   const { listed, allInbox } = await loadInboxHeads(env, mailboxId, view);
-  const thread = findThreadForMessage(groupMessagesIntoThreads(allInbox), message.id);
+  const storedId = storedThreadId(message);
+  const thread = storedId
+    ? await loadStoredThread(env, mailboxId, storedId, allInbox, listed)
+      ?? findThreadForMessage(groupMessagesByStoredThreadId(allInbox), message.id)
+    : findThreadForMessage(groupMessagesByStoredThreadId(allInbox), message.id);
   if (!thread) {
     const attachments = await listAttachmentsForMessages(env, mailboxId, [message.id]);
     const opened = readIds.length > 0 ? { ...message, is_read: 1 } : message;

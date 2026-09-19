@@ -5,6 +5,7 @@ import { discardInboundMessageWrites, persistInboundAttachments } from "./attach
 import { extractAttachments, extractBodies } from "./mime.ts";
 import { inboundStorageRejection } from "./quotas.ts";
 import { rejectClosedDevInbox } from "./dev-inbox.ts";
+import { persistThreadIdOnRecord } from "./store.ts";
 import { notifyInbound } from "./webhooks.ts";
 
 export async function handleInbound(message: InboundEmail, env: Env): Promise<void> {
@@ -77,13 +78,36 @@ export async function handleInbound(message: InboundEmail, env: Env): Promise<vo
   const mailboxId = mailbox.id;
 
   const messageId = crypto.randomUUID();
+  const persisted = await persistThreadIdOnRecord(env, mailboxId, {
+    id: messageId,
+    mailbox_id: mailboxId,
+    rfc_message_id: rfcMessageId,
+    envelope_from: message.from,
+    envelope_to: envelopeTo,
+    subject,
+    snippet,
+    body_text: bodyText,
+    header_to: headerTo,
+    header_cc: headerCc,
+    header_reply_to: headerReplyTo,
+    in_reply_to: inReplyTo,
+    references_header: referencesHeader,
+    size_bytes: message.rawSize,
+    is_read: 0,
+    is_starred: 0,
+    folder: "inbox",
+    received_at: now,
+    created_at: now,
+    thread_id: null,
+  });
   try {
     await env.DB.prepare(
       `INSERT INTO messages (
          id, mailbox_id, rfc_message_id, envelope_from, envelope_to,
          subject, snippet, body_text, header_to, header_cc, header_reply_to,
-         in_reply_to, references_header, size_bytes, is_read, folder, received_at, created_at
-       ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, 0, 'inbox', ?15, ?15)`,
+         in_reply_to, references_header, size_bytes, is_read, folder, received_at, created_at,
+         thread_id
+       ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, 0, 'inbox', ?15, ?15, ?16)`,
     )
       .bind(
         messageId,
@@ -101,6 +125,7 @@ export async function handleInbound(message: InboundEmail, env: Env): Promise<vo
         referencesHeader,
         message.rawSize,
         now,
+        persisted.thread_id ?? null,
       )
       .run();
   } catch (error) {

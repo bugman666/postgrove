@@ -9,6 +9,17 @@ export interface MessageThread {
   messages: MessageRecord[];
 }
 
+export type ThreadHeaders = {
+  id?: string;
+  rfc_message_id?: string | null;
+  in_reply_to?: string | null;
+  references_header?: string | null;
+  subject?: string | null;
+  envelope_from: string;
+  envelope_to: string;
+  thread_id?: string | null;
+};
+
 const SUBJECT_PREFIXES = [
   "re:",
   "fwd:",
@@ -301,6 +312,145 @@ export function findThreadForMessage(
   messageId: string,
 ): MessageThread | null {
   return threads.find((thread) => thread.messages.some((row) => row.id === messageId)) ?? null;
+}
+
+export function storedThreadId(message: { thread_id?: string | null }): string | null {
+  const value = message.thread_id?.trim();
+  return value ? value : null;
+}
+
+export function candidateThreadIds(message: ThreadHeaders): string[] {
+  const ids: string[] = [];
+  const seen = new Set<string>();
+  const push = (id: string) => {
+    if (!id || seen.has(id)) {
+      return;
+    }
+    seen.add(id);
+    ids.push(id);
+  };
+  const stored = storedThreadId(message);
+  if (stored) {
+    push(stored);
+  }
+  for (const id of citationIds(message)) {
+    push(`mid:${stripAngles(id)}`);
+  }
+  const own = normalizeMessageId(message.rfc_message_id);
+  if (own) {
+    push(`mid:${stripAngles(own)}`);
+  }
+  if (citationIds(message).length === 0) {
+    const key = subjectFallbackKey({
+      subject: message.subject ?? null,
+      envelope_from: message.envelope_from,
+      envelope_to: message.envelope_to,
+    });
+    if (key) {
+      push(`subj:${fnv1aHex(key)}`);
+    }
+  }
+  return ids;
+}
+
+export function relatedLookupRfcIds(message: ThreadHeaders): string[] {
+  const ids: string[] = [];
+  const seen = new Set<string>();
+  for (const id of [
+    ...citationIds(message),
+    normalizeMessageId(message.rfc_message_id),
+  ]) {
+    if (!id || seen.has(id)) {
+      continue;
+    }
+    seen.add(id);
+    ids.push(id);
+  }
+  return ids;
+}
+
+/**
+ * Assign a persisted id for a newly inserted row.
+ *
+ * Runs the same Union-Find rules as `groupMessagesIntoThreads` over the
+ * incoming message plus already-stored neighbors (citation / subject).
+ * That is what keeps a reply that only cites its immediate parent on the
+ * same `mid:<root>` as the conversation root — even when that root later
+ * falls outside the LIMIT 200 list window.
+ */
+export function resolveThreadIdForInsert(
+  incoming: MessageRecord,
+  related: MessageRecord[],
+): { threadId: string; kind: ThreadKind; members: MessageRecord[] } {
+  const threads = groupMessagesIntoThreads([incoming, ...related]);
+  const thread = findThreadForMessage(threads, incoming.id);
+  if (thread) {
+    return { threadId: thread.id, kind: thread.kind, members: thread.messages };
+  }
+  const kind: ThreadKind = citationIds(incoming).length > 0 ? "citation" : "subject";
+  const threadId = stableThreadId([incoming], kind);
+  return { threadId, kind, members: [incoming] };
+}
+
+export function threadFromStoredId(id: string, messages: MessageRecord[]): MessageThread {
+  const ordered = messages.slice().sort(compareReceived);
+  return {
+    id,
+    kind: kindFromThreadId(id, ordered),
+    messages: ordered,
+  };
+}
+
+/**
+ * Group a list window by the stored `thread_id`.
+ *
+ * Rows that still lack an id (migration not backfilled yet) fall back to
+ * the in-memory Union-Find used before this column existed.
+ */
+export function groupMessagesByStoredThreadId(messages: MessageRecord[]): MessageThread[] {
+  if (messages.length === 0) {
+    return [];
+  }
+  if (messages.some((row) => !storedThreadId(row))) {
+    return groupMessagesIntoThreads(messages);
+  }
+  const groups = new Map<string, MessageRecord[]>();
+  for (const message of messages) {
+    const id = storedThreadId(message);
+    if (!id) {
+      continue;
+    }
+    const list = groups.get(id) ?? [];
+    list.push(message);
+    groups.set(id, list);
+  }
+  const threads = [...groups.entries()].map(([id, members]) => threadFromStoredId(id, members));
+  return threads.sort((left, right) => {
+    const latestLeft = latestThreadMessage(left);
+    const latestRight = latestThreadMessage(right);
+    return (
+      latestRight.received_at - latestLeft.received_at
+      || latestRight.created_at - latestLeft.created_at
+    );
+  });
+}
+
+function kindFromThreadId(id: string, messages: MessageRecord[]): ThreadKind {
+  if (id.startsWith("mid:")) {
+    return "citation";
+  }
+  if (id.startsWith("subj:") || id.startsWith("solo:")) {
+    return "subject";
+  }
+  const citedIds = new Set<string>();
+  for (const message of messages) {
+    for (const idToken of citationIds(message)) {
+      citedIds.add(idToken);
+    }
+  }
+  return messages.some((message) => isCitationInvolved(message, citedIds))
+    ? "citation"
+    : "subject";
 }
 
 export function latestThreadMessage(thread: MessageThread): MessageRecord {

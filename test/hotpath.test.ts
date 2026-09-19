@@ -57,6 +57,7 @@ function row(partial: Partial<MessageRecord> & { id: string }): MessageRecord {
     folder: "inbox",
     received_at: 1,
     created_at: 1,
+    thread_id: null,
     ...partial,
   };
 }
@@ -72,6 +73,7 @@ function citedConversation(): MessageRecord[] {
       body_text: "先看议程。这是根信正文。",
       received_at: 100,
       created_at: 100,
+      thread_id: "mid:seed-sync-root@example.test",
     }),
     row({
       id: "reply-2",
@@ -84,6 +86,7 @@ function citedConversation(): MessageRecord[] {
       references_header: "<seed-sync-root@example.test> <seed-sync@example.test>",
       received_at: 200,
       created_at: 200,
+      thread_id: "mid:seed-sync-root@example.test",
     }),
     row({
       id: "reply",
@@ -96,6 +99,7 @@ function citedConversation(): MessageRecord[] {
       references_header: "<seed-sync-root@example.test>",
       received_at: 300,
       created_at: 300,
+      thread_id: "mid:seed-sync-root@example.test",
     }),
     row({
       id: "unrelated",
@@ -107,6 +111,7 @@ function citedConversation(): MessageRecord[] {
       is_read: 1,
       received_at: 400,
       created_at: 400,
+      thread_id: "solo:unrelated",
     }),
   ];
 }
@@ -262,8 +267,29 @@ function exec(sql: string, params: unknown[], state: State): unknown {
     return rows.sort((a, b) => a.created_at - b.created_at || a.filename.localeCompare(b.filename));
   }
 
+  if (/UPDATE messages SET thread_id/i.test(text)) {
+    const mailboxId = String(params[0]);
+    const threadId = String(params[1]);
+    const ids = new Set(parseInIds(text, params));
+    let changes = 0;
+    for (const item of state.messages) {
+      if (item.mailbox_id === mailboxId && ids.has(item.id)) {
+        item.thread_id = threadId;
+        changes += 1;
+      }
+    }
+    return { changes };
+  }
+
   if (/FROM messages/i.test(text) && /SELECT/i.test(text)) {
-    let rows = state.messages.filter((item) => item.folder === "inbox");
+    let rows = state.messages.slice();
+    if (/thread_id IS NULL/i.test(text)) {
+      rows = rows.filter((item) => item.mailbox_id === params[0] && (item.thread_id == null || item.thread_id === ""));
+      return rows;
+    }
+    if (/folder = 'inbox'/i.test(text)) {
+      rows = rows.filter((item) => item.folder === "inbox");
+    }
     if (/mailbox_id = \?1 AND id IN/i.test(text)) {
       const ids = new Set(parseInIds(text, params));
       rows = rows.filter((item) => item.mailbox_id === params[0] && ids.has(item.id));
@@ -274,6 +300,18 @@ function exec(sql: string, params: unknown[], state: State): unknown {
     }
     if (/mailbox_id = \?1/i.test(text)) {
       rows = rows.filter((item) => item.mailbox_id === params[0]);
+    }
+    if (/thread_id = \?2/i.test(text)) {
+      rows = rows.filter((item) => item.thread_id === params[1]);
+    }
+    if (/rfc_message_id IN/i.test(text) || /in_reply_to IN/i.test(text)) {
+      const ids = new Set(parseInIds(text, params));
+      rows = rows.filter(
+        (item) => ids.has(item.rfc_message_id ?? "") || ids.has(item.in_reply_to ?? ""),
+      );
+    } else if (/thread_id IN/i.test(text)) {
+      const ids = new Set(parseInIds(text, params));
+      rows = rows.filter((item) => ids.has(item.thread_id ?? ""));
     }
     if (/is_read = 0/i.test(text)) {
       rows = rows.filter((item) => item.is_read === 0);
@@ -363,10 +401,16 @@ test("opening a thread scans inbox heads once and does not reload bodies for the
   assert.ok(opened.thread.messages.every((item) => item.is_read === 1));
 
   const inboxSelects = state.sql.filter(
-    (sql) => /SELECT .+ FROM messages/i.test(sql) && /folder = 'inbox'/i.test(sql) && !/id IN/i.test(sql),
+    (sql) =>
+      /SELECT .+ FROM messages/i.test(sql)
+      && /folder = 'inbox'/i.test(sql)
+      && !/id IN/i.test(sql)
+      && !/thread_id = \?2/i.test(sql),
   );
   assert.equal(inboxSelects.length, 1, `expected one inbox head scan, got ${inboxSelects.length}: ${inboxSelects.join(" | ")}`);
   assert.equal(inboxSelects[0].includes("snippet, body_text"), false);
+  const threadSelects = state.sql.filter((sql) => /thread_id = \?2/i.test(sql) && /SELECT/i.test(sql));
+  assert.equal(threadSelects.length, 1);
 
   const bodySelects = state.sql.filter((sql) => /FROM messages/i.test(sql) && /id IN/i.test(sql));
   assert.equal(bodySelects.length, 1);
@@ -413,7 +457,11 @@ test("GET /box/:id/t/:tid marks the thread read and keeps bodies/attachments", a
   assert.equal(state.messages.find((item) => item.id === "reply-2")?.is_read, 1);
 
   const inboxBodyScans = state.sql.filter(
-    (sql) => /FROM messages/i.test(sql) && /folder = 'inbox'/i.test(sql) && /snippet, body_text/.test(sql),
+    (sql) =>
+      /FROM messages/i.test(sql)
+      && /folder = 'inbox'/i.test(sql)
+      && /snippet, body_text/.test(sql)
+      && !/thread_id = \?2/i.test(sql),
   );
   assert.equal(inboxBodyScans.length, 0);
 });
