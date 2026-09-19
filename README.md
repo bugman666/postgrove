@@ -61,7 +61,7 @@ P0 inbox on the Worker: list / read / delete against D1, inbound attachments in 
 
 ## Local development
 
-Requires Node.js 18.17+ (20+ recommended). No Cloudflare account is needed for the local path.
+Requires Node.js 22+ (`npm test` uses `--experimental-strip-types`). No Cloudflare account is needed for the local path.
 
 ```bash
 npm install
