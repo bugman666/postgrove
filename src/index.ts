@@ -5,6 +5,7 @@ import { handleAuthRoutes } from "./auth";
 import { handleHealth } from "./health";
 import { css } from "./http";
 import { handleInbound } from "./inbound";
+import { handleRestRoutes } from "./rest";
 import { APP_CSS } from "./styles";
 import { handleUi } from "./ui";
 
@@ -25,6 +26,11 @@ export default {
     const auth = await handleAuthRoutes(request, env);
     if (auth) {
       return auth;
+    }
+
+    const rest = await handleRestRoutes(request, env);
+    if (rest) {
+      return rest;
     }
 
     const attachment = await handleAttachmentRoutes(request, env, url);

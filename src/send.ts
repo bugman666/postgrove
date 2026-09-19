@@ -1,10 +1,10 @@
-import type { Env } from "./env";
+import type { Env } from "./env.ts";
 import {
   outboundFromAddress,
   resolveOutboundAdapter,
   type OutboundDraft,
   type SendInput,
-} from "./outbound";
+} from "./outbound.ts";
 import {
   insertOutboundAttempt,
   insertSentMessage,
@@ -12,9 +12,9 @@ import {
   type MailboxRecord,
   type MessageRecord,
   type OutboundAttemptRecord,
-} from "./store";
+} from "./store.ts";
 
-export { parseSendFields, type SendInput } from "./outbound";
+export { parseSendFields, type SendInput } from "./outbound.ts";
 
 export interface SendOutcome {
   attempt: OutboundAttemptRecord;
