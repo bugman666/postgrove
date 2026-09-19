@@ -936,7 +936,7 @@ async function applyTokenRequestQuota(env: Env, principal: RestPrincipal): Promi
     }
     await incrementTokenRequestUsage(env, principal.tokenId);
   } catch {
-    // Migration 0012 not applied: skip daily quota so rate_limited still works.
+    // Migration 0013 not applied: skip daily quota so rate_limited still works.
   }
   return null;
 }
