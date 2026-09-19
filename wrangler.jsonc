@@ -13,5 +13,18 @@
       "preview_database_id": "postgrove-local",
       "migrations_dir": "migrations"
     }
-  ]
+  ],
+  // Replace bucket_name after `npx wrangler r2 bucket create postgrove-attachments`.
+  // Local `wrangler dev` uses preview_bucket_name.
+  "r2_buckets": [
+    {
+      "binding": "ATTACHMENTS",
+      "bucket_name": "postgrove-attachments",
+      "preview_bucket_name": "postgrove-attachments-local"
+    }
+  ],
+  "vars": {
+    "ATTACHMENT_MAX_BYTES": "10485760",
+    "ATTACHMENT_MAX_COUNT": "10"
+  }
 }

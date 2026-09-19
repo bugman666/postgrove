@@ -1,4 +1,9 @@
 import type { Env } from "./env";
+import {
+  listMessageAttachments,
+  renderAttachmentsHtml,
+  type AttachmentRecord,
+} from "./attachments";
 import { requireOwner, type OwnerPrincipal } from "./auth";
 import { html, redirect } from "./http";
 import { EMPTY_ART, GROVE_MARK, escapeHtml, formatReceived } from "./html";
@@ -75,6 +80,7 @@ export async function handleUi(
       "会话绑在你登录的地址上。登出后需要再次 POST /auth/login。",
       "还没收到信？确认 Email Routing 已指向本 Worker。",
       describeOutbound(env).hint,
+      "入站附件存在 R2。单文件上限见 ATTACHMENT_MAX_BYTES（默认 10 MB），数量上限见 ATTACHMENT_MAX_COUNT（默认 10）。出站写信带附件是后续工作。",
     ], true));
   }
 
@@ -111,8 +117,9 @@ export async function handleUi(
     }
     const message = (await getInboxMessage(env, mailbox.id, existing.id)) ?? existing;
     const messages = await listInboxMessages(env, mailbox.id);
+    const attachments = await listMessageAttachments(env, mailbox.id, message.id);
     const showReply = url.searchParams.get("reply") === "1";
-    return html(renderInboxPage(mailbox, messages, message, { showReply }));
+    return html(renderInboxPage(mailbox, messages, message, { showReply, attachments }));
   }
 
   const boxMatch = path.match(/^\/box\/([^/]+)$/);
@@ -298,7 +305,7 @@ function renderInboxPage(
   mailbox: MailboxRecord,
   messages: MessageRecord[],
   selected: MessageRecord | null,
-  flags: { showReply?: boolean; deleted?: boolean },
+  flags: { showReply?: boolean; deleted?: boolean; attachments?: AttachmentRecord[] },
 ): string {
   const list = messages.length === 0
     ? emptyBlock("还没有信。域名路由配好后，寄一封到你的地址试试。")
@@ -306,7 +313,12 @@ function renderInboxPage(
 
   let reading: string;
   if (selected) {
-    reading = renderReading(mailbox, selected, Boolean(flags.showReply));
+    reading = renderReading(
+      mailbox,
+      selected,
+      Boolean(flags.showReply),
+      flags.attachments ?? [],
+    );
   } else {
     const banner = flags.deleted
       ? `<p class="banner">已移出收件箱。</p>`
@@ -360,6 +372,7 @@ function renderReading(
   mailbox: MailboxRecord,
   message: MessageRecord,
   showReply: boolean,
+  attachments: AttachmentRecord[] = [],
 ): string {
   const subject = message.subject?.trim() ? message.subject : "（无主题）";
   const body = message.body_text?.trim()
@@ -389,6 +402,7 @@ function renderReading(
         </form>
       </div>
       ${replyBanner}
+      ${renderAttachmentsHtml(attachments)}
       <pre class="body">${body}</pre>
     </article>
   </div>`;

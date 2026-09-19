@@ -138,3 +138,55 @@ INSERT OR IGNORE INTO messages (
   1789815600000,
   1789815600000
 );
+
+INSERT OR IGNORE INTO messages (
+  id,
+  mailbox_id,
+  rfc_message_id,
+  envelope_from,
+  envelope_to,
+  subject,
+  snippet,
+  body_text,
+  size_bytes,
+  is_read,
+  folder,
+  received_at,
+  created_at
+) VALUES (
+  '22222222-2222-4222-8222-222222222224',
+  '11111111-1111-4111-8111-111111111111',
+  '<seed-attachment@example.test>',
+  'files@grove.test',
+  'inbox@example.test',
+  '本地附件种子',
+  '这封信带一个限内附件，阅读页应列出并可下载。',
+  '这封信带一个限内附件，阅读页应列出并可下载。
+
+下载地址需要主人会话。未登录访问 /attachments/… 应返回 401。',
+  240,
+  0,
+  'inbox',
+  1789816200000,
+  1789816200000
+);
+
+INSERT OR IGNORE INTO attachments (
+  id,
+  message_id,
+  mailbox_id,
+  filename,
+  content_type,
+  size_bytes,
+  r2_key,
+  created_at
+) VALUES (
+  '33333333-3333-4333-8333-333333333331',
+  '22222222-2222-4222-8222-222222222224',
+  '11111111-1111-4111-8111-111111111111',
+  'grove-note.txt',
+  'text/plain',
+  84,
+  'attachments/11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222224/33333333-3333-4333-8333-333333333331/grove-note.txt',
+  1789816200000
+);

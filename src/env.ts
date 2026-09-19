@@ -1,5 +1,7 @@
 export interface Env {
   DB: D1Database;
+  /** R2 bucket for inbound attachment bytes. */
+  ATTACHMENTS?: R2Bucket;
   /** HMAC secret for owner session cookies. Rotate to revoke all sessions. */
   SESSION_SECRET?: string;
   /** Shared secret for every mailbox (not a per-address password). */
@@ -18,6 +20,10 @@ export interface Env {
   OUTBOUND_HTTP_TOKEN?: string;
   /** Optional From override for any provider (wins over RESEND_FROM). */
   OUTBOUND_FROM?: string;
+  /** Per-attachment size cap in bytes (default 10485760 = 10 MiB). */
+  ATTACHMENT_MAX_BYTES?: string;
+  /** Max attachments stored per inbound message (default 10). */
+  ATTACHMENT_MAX_COUNT?: string;
 }
 
 /** Envelope fields used by the Email Routing stub. */
