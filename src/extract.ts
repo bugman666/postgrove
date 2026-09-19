@@ -23,7 +23,7 @@ export type ExtractResult = ExtractOk | ExtractFail;
 const KIND_HINT = 'kind 必须是 otp 或 link。';
 
 const LABELED_OTP =
-  /(?:验证码|校验码|確認碼|确认码|one[-\s]?time(?:\s+(?:pass(?:word|code)?|code))?|passcode|otp|pin(?:\s*code)?|(?:security|login|verification|confirm(?:ation)?)\s+code|\bcode)\s*(?:is|为|：|:|#)?\s*([A-Za-z0-9]{4,8})\b/gi;
+  /(?:验证码|校验码|確認碼|确认码|one[-\s]?time(?:\s+(?:pass(?:word|code)?|code))?|passcode|otp|pin(?:\s*code)?|(?:security|login|verification|confirm(?:ation)?)\s+code|\bcode)\s*(?:is|为|是|：|:|#)\s*([A-Za-z0-9]{4,8})\b/gi;
 
 const STANDALONE_DIGITS = /(?<![\dA-Za-z])(\d{4,8})(?![\dA-Za-z])/g;
 

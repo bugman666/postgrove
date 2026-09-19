@@ -266,7 +266,7 @@ async function waitDevInbox(
           host: firstString(parsed.body.host, url.searchParams.get("host")),
         });
         if (!extracted.ok) {
-          return json({ ok: false, ...extracted, inbox: publicDevInbox(live), message: publicMessage(match) }, 422);
+          return json({ ...extracted, inbox: publicDevInbox(live), message: publicMessage(match) }, 422);
         }
         return json({
           ok: true,
@@ -332,7 +332,7 @@ async function extractDevInbox(
     host: stringField(parsed.body, "host"),
   });
   if (!extracted.ok) {
-    return json({ ok: false, ...extracted, message: publicMessage(message) }, extracted.error === "invalid_kind" || extracted.error === "invalid_pattern" ? 400 : 422);
+    return json({ ...extracted, message: publicMessage(message) }, extracted.error === "invalid_kind" || extracted.error === "invalid_pattern" ? 400 : 422);
   }
   return json({ ok: true, inbox: publicDevInbox(loaded.inbox), message: publicMessage(message), extract: extracted });
 }

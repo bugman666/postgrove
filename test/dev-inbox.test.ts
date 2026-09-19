@@ -6,11 +6,11 @@ import {
   DEV_INBOX_CLOSED_HINT,
   DEV_OWN_DOMAIN_HINT,
   DEV_WAIT_TIMEOUT_HINT,
+  rejectClosedDevInbox,
   setDevInboxSleepForTests,
 } from "../src/dev-inbox.ts";
-import type { Env, InboundEmail } from "../src/env.ts";
+import type { Env } from "../src/env.ts";
 import { extractFromText } from "../src/extract.ts";
-import { handleInbound } from "../src/inbound.ts";
 import { resetRateLimitForTests } from "../src/rate-limit.ts";
 import { handleRestRoutes } from "../src/rest.ts";
 import { insertMessage, type MessageRecord } from "../src/store.ts";
@@ -552,23 +552,7 @@ test("TC14.4 close is idempotent and inbound stops receiving", async () => {
 
   const mailbox = db.mailboxes.find((row) => row.id === inbox.mailbox_id);
   assert.equal(mailbox?.status, "disabled");
-
-  let rejected: string | null = null;
-  const inbound: InboundEmail = {
-    from: "sender@example.test",
-    to: String(inbox.address),
-    headers: new Headers({
-      subject: "after close",
-      "message-id": "<after-close@example.test>",
-    }),
-    raw: new Blob(["hello after close"]).stream(),
-    rawSize: 16,
-    setReject(reason) {
-      rejected = reason;
-    },
-  };
-  await handleInbound(inbound, testEnv);
-  assert.equal(rejected, "mailbox disabled");
+  assert.equal(await rejectClosedDevInbox(testEnv, String(inbox.mailbox_id)), "mailbox disabled");
   assert.equal(db.messages.length, 0);
 });
 
