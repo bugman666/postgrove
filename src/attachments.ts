@@ -1,11 +1,11 @@
-import type { Env } from "./env";
-import { requireOwner } from "./auth";
+import type { Env } from "./env.ts";
+import { requireOwner } from "./auth.ts";
 import { mailboxAllowed } from "./users.ts";
 import { getMailbox } from "./store.ts";
-import { formatBytes, missingR2Hint } from "./attachment-limits";
-import { escapeHtml } from "./html";
-import { json, methodNotAllowed, notFoundJson, forbiddenJson } from "./http";
-import type { ParsedAttachment } from "./mime";
+import { formatBytes, missingR2Hint } from "./attachment-limits.ts";
+import { escapeHtml } from "./html.ts";
+import { json, methodNotAllowed, notFoundJson, forbiddenJson } from "./http.ts";
+import type { ParsedAttachment } from "./mime.ts";
 
 export {
   attachmentLimits,
@@ -18,8 +18,8 @@ export {
   missingR2Hint,
   tooLargeHint,
   tooManyHint,
-} from "./attachment-limits";
-export type { AttachmentLimitError, AttachmentLimits } from "./attachment-limits";
+} from "./attachment-limits.ts";
+export type { AttachmentLimitError, AttachmentLimits } from "./attachment-limits.ts";
 
 export interface AttachmentRecord {
   id: string;

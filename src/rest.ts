@@ -316,15 +316,15 @@ async function requireRestAuth(request: Request, env: Env): Promise<AuthResult<R
 }
 
 async function listAddresses(env: Env, principal: RestPrincipal): Promise<Response> {
-  if (restIsAdmin(principal)) {
-    const mailboxes = await listMailboxes(env);
-    return json({ ok: true, mailboxes: mailboxes.map(publicMailbox) });
+  if (principal.kind === "token" && principal.tokenKind !== "admin") {
+    const mailbox = await getMailbox(env, principal.mailboxId);
+    if (!mailbox) {
+      return notFoundJson();
+    }
+    return json({ ok: true, mailboxes: [publicMailbox(mailbox)] });
   }
-  const mailbox = await getMailbox(env, principal.mailboxId);
-  if (!mailbox) {
-    return notFoundJson();
-  }
-  return json({ ok: true, mailboxes: [publicMailbox(mailbox)] });
+  const mailboxes = await listMailboxes(env);
+  return json({ ok: true, mailboxes: mailboxes.map(publicMailbox) });
 }
 
 async function readMailbox(env: Env, principal: RestPrincipal, idOrAddress: string): Promise<Response> {
@@ -972,7 +972,7 @@ function parseNonNegativeInt(raw: string | undefined, fallback: number): number 
 }
 
 function denyOtherMailbox(principal: RestPrincipal, mailbox: MailboxRecord): Response | null {
-  if (restIsAdmin(principal)) {
+  if (restIsAdmin(principal) || principal.kind !== "token") {
     return null;
   }
   if (principal.mailboxId === mailbox.id || principal.address === mailbox.address) {
