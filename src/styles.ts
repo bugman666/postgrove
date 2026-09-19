@@ -13,7 +13,7 @@ export const APP_CSS = `:root {
   --pg-color-warning: #BB3E03;
   --pg-color-success: #2D6A4F;
   --pg-color-focus-ring: #2D6A4F;
-  --pg-font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  --pg-font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans CJK SC", "Noto Sans SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "WenQuanYi Micro Hei", "Noto Sans", sans-serif;
   --pg-font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
   --pg-text-xs: 12px;
   --pg-text-sm: 13px;
