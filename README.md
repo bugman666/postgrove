@@ -246,6 +246,8 @@ Expect JSON with `"ok": true` and `"db": "ready"` after migrations. A `503` with
 
 Local example uses `OUTBOUND_PROVIDER=stub`: the adapter records the attempt and returns success without sending. Real providers fail **loud** when config is missing or the key is rejected — the row is stored as `failed` and the compose page shows the error plus the next step.
 
+Send is outbox-first (mainstream outbox / send-status idea): the Worker writes `outbound_attempts` as `pending` with an **idempotency key** before the provider call, then updates `sent` / `failed` and the Sent folder. Repeat `POST /api/send` or `POST /api/v1/messages` with the same `Idempotency-Key` header or JSON `idempotency_key` returns the original attempt and does not call the provider again. Transient provider errors (network, 429, 5xx) retry inside that request up to 3 times. `wrangler.jsonc` has no cron triggers yet — a scheduled drain of leftover `pending` rows is a later step; replay the same key (or send again) to finish work.
+
 | Env | Role |
 |-----|------|
 | `OUTBOUND_PROVIDER` | `stub` · `resend` · `http`. Unset → send fails with an actionable hint |
@@ -259,6 +261,7 @@ Local example uses `OUTBOUND_PROVIDER=stub`: the adapter records the attempt and
 # stub success (after login cookie)
 curl -sS -b /tmp/pg-cookies -X POST http://127.0.0.1:8787/api/send \
   -H 'content-type: application/json' \
+  -H 'Idempotency-Key: 11111111-1111-4111-8111-111111111110' \
   -d '{"to":"neighbor@example.test","subject":"hello","text":"from local stub"}'
 
 curl -sS -b /tmp/pg-cookies \
@@ -686,7 +689,7 @@ Then, in the Cloudflare dashboard, enable Email Routing for your domain and add 
 | `src/outbound.ts` | Pluggable outbound adapters (`stub` / `resend` / `http`) |
 | `src/safe-url.ts` | SSRF guard + shared `recheckResolvedIps` (webhooks / forward / logo) |
 | `src/webhooks.ts` | Inbound signed webhook + forward; secret enveloped at rest; `validateSafeUrl` on save/fetch/redirect |
-| `src/send.ts` | Validate + persist outbound attempts |
+| `src/send.ts` | Outbox send: pending + idempotency key, then provider + Sent row |
 | `migrations/0001_init.sql` | D1 `mailboxes` + `messages` |
 | `migrations/0002_message_body.sql` | `messages.body_text` |
 | `migrations/0003_outbound_attempts.sql` | D1 `outbound_attempts` |
@@ -701,6 +704,7 @@ Then, in the Cloudflare dashboard, enable Email Routing for your domain and add 
 | `migrations/0012_dev_inboxes.sql` | Ephemeral developer inboxes (own domain; not +tag aliases) |
 | `migrations/0013_aliases_api_key_quotas.sql` | `mailbox_aliases` + token kind/quotas + `api_token_usage` |
 | `migrations/0014_webhook_secret_envelope.sql` | `webhook_secret` envelope-at-rest contract (lazy upgrade of leftover plaintext) |
+| `migrations/0015_outbound_outbox.sql` | `outbound_attempts` pending + idempotency_key + retry columns |
 | `scripts/seed-local.sql` | Local sample mailboxes + messages (not for remote) |
 | `scripts/seed-grove-note.txt` | Local sample attachment bytes |
 | `wrangler.jsonc` | Worker + D1 + R2 bindings (placeholders) |

@@ -50,7 +50,13 @@ import {
   restRateLimitConfig,
   signupRateLimitConfig,
 } from "./rate-limit.ts";
-import { parseSendFields, sendOutbound } from "./send.ts";
+import {
+  parseIdempotencyKey,
+  parseSendFields,
+  publicOutboundAttempt,
+  readIdempotencyKey,
+  sendOutbound,
+} from "./send.ts";
 import {
   getInboxMessage,
   getMailbox,
@@ -457,7 +463,13 @@ async function sendMessage(request: Request, env: Env, principal: RestPrincipal)
       return quotaJson(sendQuota.error, sendQuota.hint, { used: sendQuota.used, limit: sendQuota.limit });
     }
   }
-  const outcome = await sendOutbound(env, mailbox, fields.input);
+  const idempotency = parseIdempotencyKey(readIdempotencyKey(request, parsed.body));
+  if (!idempotency.ok) {
+    return json({ ok: false, error: idempotency.error, hint: idempotency.hint }, 400);
+  }
+  const outcome = await sendOutbound(env, mailbox, fields.input, {
+    idempotencyKey: idempotency.key,
+  });
   if (principal.kind === "token" && outcome.attempt.status === "sent") {
     try {
       await incrementTokenSendUsage(env, principal.tokenId);
@@ -468,7 +480,7 @@ async function sendMessage(request: Request, env: Env, principal: RestPrincipal)
   return json(
     {
       ok: outcome.attempt.status === "sent",
-      attempt: publicAttempt(outcome.attempt),
+      attempt: publicOutboundAttempt(outcome.attempt),
       sent: outcome.sent ? publicMessageDetail(outcome.sent) : null,
       error: outcome.attempt.error,
       hint: outcome.attempt.hint,
@@ -1115,39 +1127,5 @@ function publicMessageDetail(row: MessageRecord) {
     in_reply_to: row.in_reply_to,
     references: row.references_header,
     size_bytes: row.size_bytes,
-  };
-}
-
-function publicAttempt(row: {
-  id: string;
-  mailbox_id: string;
-  from_address: string;
-  to_address: string;
-  cc_address: string | null;
-  subject: string | null;
-  in_reply_to: string | null;
-  references_header: string | null;
-  provider: string;
-  status: string;
-  error: string | null;
-  hint: string | null;
-  provider_message_id: string | null;
-  created_at: number;
-}) {
-  return {
-    id: row.id,
-    mailbox_id: row.mailbox_id,
-    from: row.from_address,
-    to: row.to_address,
-    cc: row.cc_address,
-    subject: row.subject,
-    in_reply_to: row.in_reply_to,
-    references: row.references_header,
-    provider: row.provider,
-    status: row.status,
-    error: row.error,
-    hint: row.hint,
-    provider_message_id: row.provider_message_id,
-    created_at: row.created_at,
   };
 }

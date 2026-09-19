@@ -23,6 +23,8 @@ export interface OutboundAdapterResult {
   error?: string;
   hint?: string;
   detail?: string;
+  /** Transient provider / network errors may retry inside the request. */
+  retryable?: boolean;
 }
 
 export interface OutboundAdapter {
@@ -331,6 +333,7 @@ export class ResendAdapter implements OutboundAdapter {
         error: "outbound_failed",
         hint: "Could not reach Resend. Check network egress and retry.",
         detail,
+        retryable: true,
       };
     }
     return parseProviderResponse(response, "Resend", "Check RESEND_API_KEY and that the From domain is verified in Resend.");
@@ -370,6 +373,7 @@ export class HttpAdapter implements OutboundAdapter {
         error: "outbound_failed",
         hint: "Could not reach OUTBOUND_HTTP_URL. Check the URL and retry.",
         detail,
+        retryable: true,
       };
     }
     return parseProviderResponse(
@@ -462,6 +466,7 @@ async function parseProviderResponse(
 
   const providerMessage = extractProviderMessage(parsed) ?? raw.slice(0, 240) ?? "";
   const unauthorized = response.status === 401 || response.status === 403;
+  const retryable = response.status === 429 || response.status >= 500;
   return {
     ok: false,
     error: unauthorized ? "outbound_auth_failed" : "outbound_failed",
@@ -469,6 +474,7 @@ async function parseProviderResponse(
       ? `${label} rejected the credentials. ${configHint}`
       : `${label} returned ${response.status}. ${configHint}`,
     detail: providerMessage || `HTTP ${response.status}`,
+    retryable: unauthorized ? false : retryable,
   };
 }
 

@@ -705,6 +705,10 @@ function sentRecord(
   };
 }
 
+export type OutboundAttemptStatus = "pending" | "sent" | "failed";
+
+export const OUTBOUND_MAX_ATTEMPTS = 3;
+
 export interface OutboundAttemptRecord {
   id: string;
   mailbox_id: string;
@@ -716,16 +720,28 @@ export interface OutboundAttemptRecord {
   in_reply_to: string | null;
   references_header: string | null;
   provider: string;
-  status: "sent" | "failed";
+  status: OutboundAttemptStatus;
   error: string | null;
   hint: string | null;
   provider_message_id: string | null;
+  idempotency_key: string;
+  attempt_count: number;
+  max_attempts: number;
+  last_attempt_at: number | null;
+  sent_message_id: string | null;
   created_at: number;
+  updated_at: number;
 }
 
 const OUTBOUND_COLUMNS = `id, mailbox_id, from_address, to_address, cc_address, subject,
   body_text, in_reply_to, references_header, provider, status, error, hint,
-  provider_message_id, created_at`;
+  provider_message_id, idempotency_key, attempt_count, max_attempts,
+  last_attempt_at, sent_message_id, created_at, updated_at`;
+
+export function isUniqueConstraintError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /unique constraint failed/i.test(message);
+}
 
 export async function insertOutboundAttempt(
   env: Env,
@@ -735,8 +751,9 @@ export async function insertOutboundAttempt(
     `INSERT INTO outbound_attempts (
        id, mailbox_id, from_address, to_address, cc_address, subject, body_text,
        in_reply_to, references_header, provider, status, error, hint,
-       provider_message_id, created_at
-     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)`,
+       provider_message_id, created_at, idempotency_key, attempt_count,
+       max_attempts, last_attempt_at, sent_message_id, updated_at
+     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)`,
   )
     .bind(
       row.id,
@@ -754,6 +771,39 @@ export async function insertOutboundAttempt(
       row.hint,
       row.provider_message_id,
       row.created_at,
+      row.idempotency_key,
+      row.attempt_count,
+      row.max_attempts,
+      row.last_attempt_at,
+      row.sent_message_id,
+      row.updated_at,
+    )
+    .run();
+}
+
+export async function updateOutboundAttempt(
+  env: Env,
+  row: OutboundAttemptRecord,
+): Promise<void> {
+  await env.DB.prepare(
+    `UPDATE outbound_attempts
+     SET provider = ?3, status = ?4, error = ?5, hint = ?6,
+         provider_message_id = ?7, attempt_count = ?8, last_attempt_at = ?9,
+         sent_message_id = ?10, updated_at = ?11
+     WHERE id = ?1 AND mailbox_id = ?2`,
+  )
+    .bind(
+      row.id,
+      row.mailbox_id,
+      row.provider,
+      row.status,
+      row.error,
+      row.hint,
+      row.provider_message_id,
+      row.attempt_count,
+      row.last_attempt_at,
+      row.sent_message_id,
+      row.updated_at,
     )
     .run();
 }
@@ -768,6 +818,19 @@ export async function getOutboundAttempt(
      WHERE id = ?1 AND mailbox_id = ?2`,
   )
     .bind(attemptId, mailboxId)
+    .first<OutboundAttemptRecord>();
+}
+
+export async function getOutboundAttemptByIdempotency(
+  env: Env,
+  mailboxId: string,
+  idempotencyKey: string,
+): Promise<OutboundAttemptRecord | null> {
+  return env.DB.prepare(
+    `SELECT ${OUTBOUND_COLUMNS} FROM outbound_attempts
+     WHERE mailbox_id = ?1 AND idempotency_key = ?2`,
+  )
+    .bind(mailboxId, idempotencyKey)
     .first<OutboundAttemptRecord>();
 }
 
