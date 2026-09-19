@@ -7,7 +7,10 @@ import {
 } from "./outbound";
 import {
   insertOutboundAttempt,
+  insertSentMessage,
+  promoteDraftToSent,
   type MailboxRecord,
+  type MessageRecord,
   type OutboundAttemptRecord,
 } from "./store";
 
@@ -16,16 +19,19 @@ export { parseSendFields, type SendInput } from "./outbound";
 export interface SendOutcome {
   attempt: OutboundAttemptRecord;
   httpStatus: number;
+  sent: MessageRecord | null;
 }
 
 /**
  * Resolve the adapter, attempt the send, and persist the outcome.
  * Config / provider failures are stored as `failed` so the UI can show them.
+ * A successful send also writes a `folder=sent` message (and consumes a draft).
  */
 export async function sendOutbound(
   env: Env,
   mailbox: MailboxRecord,
   input: SendInput,
+  options: { draftId?: string | null } = {},
 ): Promise<SendOutcome> {
   const from = outboundFromAddress(env, mailbox.address);
   const headers: OutboundDraft["headers"] = {};
@@ -53,7 +59,7 @@ export async function sendOutbound(
       hint: resolved.hint,
       providerMessageId: null,
     });
-    return { attempt, httpStatus: 503 };
+    return { attempt, httpStatus: 503, sent: null };
   }
 
   const result = await resolved.adapter.send(draft);
@@ -65,7 +71,8 @@ export async function sendOutbound(
       hint: null,
       providerMessageId: result.providerMessageId ?? null,
     });
-    return { attempt, httpStatus: 200 };
+    const sent = await recordSent(env, mailbox, input, options.draftId);
+    return { attempt, httpStatus: 200, sent };
   }
 
   const attempt = await persist(env, mailbox.id, draft, {
@@ -75,7 +82,30 @@ export async function sendOutbound(
     hint: [result.hint, result.detail].filter(Boolean).join(" "),
     providerMessageId: result.providerMessageId ?? null,
   });
-  return { attempt, httpStatus: 502 };
+  return { attempt, httpStatus: 502, sent: null };
+}
+
+async function recordSent(
+  env: Env,
+  mailbox: MailboxRecord,
+  input: SendInput,
+  draftId?: string | null,
+): Promise<MessageRecord> {
+  const fields = {
+    to: input.to,
+    cc: input.cc,
+    subject: input.subject,
+    text: input.text,
+    inReplyTo: input.inReplyTo,
+    references: input.references,
+  };
+  if (draftId) {
+    const promoted = await promoteDraftToSent(env, mailbox, draftId, fields);
+    if (promoted) {
+      return promoted;
+    }
+  }
+  return insertSentMessage(env, mailbox, fields);
 }
 
 async function persist(

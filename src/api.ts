@@ -1,5 +1,11 @@
 import type { Env } from "./env";
 import { requireOwner, type OwnerPrincipal } from "./auth";
+import {
+  isSystemFolder,
+  parseDraftFields,
+  parseFolder,
+  publicFolderList,
+} from "./folders";
 import { forbiddenJson, json, methodNotAllowed, notFoundJson } from "./http";
 import { buildComposePrefill, parseComposeMode } from "./reply";
 import { parseSendFields, sendOutbound } from "./send";
@@ -7,13 +13,18 @@ import {
   countUnreadInbox,
   getInboxMessage,
   getMailbox,
+  getMailboxMessage,
   getMessageById,
+  insertDraft,
+  listFolderMessages,
   listInboxMessages,
   listOutboundAttempts,
   markRead,
+  moveMessage,
   setRead,
   setStarred,
   trashMessage,
+  updateDraft,
   type MailboxRecord,
   type MessageRecord,
   type OutboundAttemptRecord,
@@ -80,6 +91,32 @@ export async function handleApi(
     return searchMessages(env, mailbox, url);
   }
 
+  if (path === "/api/folders") {
+    if (method !== "GET") {
+      return methodNotAllowed("GET");
+    }
+    return json({ ok: true, folders: publicFolderList() });
+  }
+
+  if (path === "/api/drafts") {
+    if (method !== "POST") {
+      return methodNotAllowed("POST");
+    }
+    return upsertDraft(request, env, owner, null);
+  }
+
+  const oneDraft = path.match(/^\/api\/drafts\/([^/]+)$/);
+  if (oneDraft) {
+    const draftId = decodeURIComponent(oneDraft[1]);
+    if (method === "GET") {
+      return readDraft(env, owner, draftId);
+    }
+    if (method === "POST") {
+      return upsertDraft(request, env, owner, draftId);
+    }
+    return methodNotAllowed("GET, POST");
+  }
+
   const mailboxMessages = path.match(/^\/api\/mailboxes\/([^/]+)\/messages$/);
   if (mailboxMessages) {
     if (method !== "GET") {
@@ -91,6 +128,16 @@ export async function handleApi(
     }
     if (!sameMailbox(owner, mailbox)) {
       return forbiddenJson();
+    }
+    const folder = parseFolder(url.searchParams.get("folder"));
+    if (folder !== "inbox") {
+      const messages = await listFolderMessages(env, mailbox.id, folder);
+      return json({
+        ok: true,
+        mailbox: publicMailbox(mailbox),
+        folder,
+        messages: messages.map(publicMessageListItem),
+      });
     }
     return searchMessages(env, mailbox, url);
   }
@@ -117,6 +164,14 @@ export async function handleApi(
       return methodNotAllowed("GET");
     }
     return composePrefill(env, owner, decodeURIComponent(composeMatch[1]), url);
+  }
+
+  const moveMatch = path.match(/^\/api\/messages\/([^/]+)\/move$/);
+  if (moveMatch) {
+    if (method !== "POST") {
+      return methodNotAllowed("POST");
+    }
+    return moveOwnedMessage(request, env, owner, decodeURIComponent(moveMatch[1]));
   }
 
   const oneMessage = path.match(/^\/api\/messages\/([^/]+)$/);
@@ -190,11 +245,13 @@ async function sendMessage(
     return json({ ok: false, error: parsed.error, hint: parsed.hint }, 400);
   }
 
-  const outcome = await sendOutbound(env, mailbox, parsed.input);
+  const draftId = optionalId((body as Record<string, unknown>).draft_id);
+  const outcome = await sendOutbound(env, mailbox, parsed.input, { draftId });
   return json(
     {
       ok: outcome.attempt.status === "sent",
       attempt: publicAttempt(outcome.attempt),
+      sent: outcome.sent ? publicMessageDetail(outcome.sent) : null,
       error: outcome.attempt.error,
       hint: outcome.attempt.hint,
     },
@@ -233,10 +290,126 @@ async function readMessage(
   if (existing.mailbox_id !== owner.mailboxId) {
     return forbiddenJson();
   }
-  if (existing.is_read !== 1) {
+  if (existing.folder === "inbox" && existing.is_read !== 1) {
     await markRead(env, existing.mailbox_id, existing.id);
   }
-  const message = await getInboxMessage(env, existing.mailbox_id, existing.id);
+  const message =
+    existing.folder === "inbox"
+      ? await getInboxMessage(env, existing.mailbox_id, existing.id)
+      : await getMailboxMessage(env, existing.mailbox_id, existing.id);
+  if (!message) {
+    return notFoundJson();
+  }
+  return json({ ok: true, message: publicMessageDetail(message) });
+}
+
+async function readDraft(
+  env: Env,
+  owner: OwnerPrincipal,
+  draftId: string,
+): Promise<Response> {
+  const existing = await getMailboxMessage(env, owner.mailboxId, draftId);
+  if (!existing || existing.folder !== "draft") {
+    return notFoundJson();
+  }
+  return json({ ok: true, draft: publicDraft(existing) });
+}
+
+async function upsertDraft(
+  request: Request,
+  env: Env,
+  owner: OwnerPrincipal,
+  draftId: string | null,
+): Promise<Response> {
+  const mailbox = await getMailbox(env, owner.mailboxId);
+  if (!mailbox) {
+    return notFoundJson();
+  }
+
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return json(
+      {
+        ok: false,
+        error: "invalid_request",
+        hint: 'Send JSON { "to", "subject", "text" } (all optional for drafts).',
+      },
+      400,
+    );
+  }
+  if (!body || typeof body !== "object") {
+    return json(
+      {
+        ok: false,
+        error: "invalid_request",
+        hint: 'Send JSON { "to", "subject", "text" } (all optional for drafts).',
+      },
+      400,
+    );
+  }
+
+  const record = body as Record<string, unknown>;
+  const parsed = parseDraftFields(record);
+  if (!parsed.ok) {
+    return json({ ok: false, error: parsed.error, hint: parsed.hint }, 400);
+  }
+
+  const id = draftId ?? optionalId(record.id);
+  const saved = id
+    ? await updateDraft(env, mailbox, id, parsed.fields)
+    : await insertDraft(env, mailbox, parsed.fields);
+  if (!saved) {
+    return notFoundJson();
+  }
+  return json({ ok: true, draft: publicDraft(saved) }, id ? 200 : 201);
+}
+
+async function moveOwnedMessage(
+  request: Request,
+  env: Env,
+  owner: OwnerPrincipal,
+  messageId: string,
+): Promise<Response> {
+  const existing = await getMessageById(env, messageId);
+  if (!existing) {
+    return notFoundJson();
+  }
+  if (existing.mailbox_id !== owner.mailboxId) {
+    return forbiddenJson();
+  }
+
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return json(
+      {
+        ok: false,
+        error: "invalid_request",
+        hint: 'Send JSON { "folder": "inbox"|"sent"|"draft"|"trash"|"spam" }.',
+      },
+      400,
+    );
+  }
+  const folderRaw =
+    body && typeof body === "object" ? (body as Record<string, unknown>).folder : null;
+  if (typeof folderRaw !== "string" || !isSystemFolder(folderRaw)) {
+    return json(
+      {
+        ok: false,
+        error: "invalid_request",
+        hint: 'Send JSON { "folder": "inbox"|"sent"|"draft"|"trash"|"spam" }.',
+      },
+      400,
+    );
+  }
+  const moved = await moveMessage(env, existing.mailbox_id, existing.id, folderRaw);
+  if (!moved) {
+    return notFoundJson();
+  }
+  const message = await getMailboxMessage(env, existing.mailbox_id, existing.id);
   if (!message) {
     return notFoundJson();
   }
@@ -444,8 +617,32 @@ function publicMessageListItem(row: MessageRecord) {
     snippet: row.snippet,
     is_read: row.is_read === 1,
     is_starred: row.is_starred === 1,
+    folder: row.folder,
     received_at: row.received_at,
   };
+}
+
+function publicDraft(row: MessageRecord) {
+  return {
+    id: row.id,
+    mailbox_id: row.mailbox_id,
+    folder: "draft" as const,
+    to: row.envelope_to,
+    cc: row.header_cc ?? "",
+    subject: row.subject ?? "",
+    text: row.body_text ?? "",
+    in_reply_to: row.in_reply_to,
+    references: row.references_header,
+    updated_at: row.received_at,
+  };
+}
+
+function optionalId(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
 }
 
 function publicMessageDetail(row: MessageRecord) {

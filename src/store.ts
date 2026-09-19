@@ -1,4 +1,9 @@
 import type { Env } from "./env";
+import {
+  snippetFromBody,
+  type DraftFields,
+  type SystemFolder,
+} from "./folders.ts";
 import type { InboxFilter } from "./triage";
 
 export interface MailboxRecord {
@@ -132,6 +137,22 @@ export async function countUnreadInbox(env: Env, mailboxId: string): Promise<num
   return Number(row?.unread_count ?? 0);
 }
 
+export async function listFolderMessages(
+  env: Env,
+  mailboxId: string,
+  folder: SystemFolder,
+): Promise<MessageRecord[]> {
+  const rows = await env.DB.prepare(
+    `SELECT ${MESSAGE_COLUMNS} FROM messages
+     WHERE mailbox_id = ?1 AND folder = ?2
+     ORDER BY received_at DESC, created_at DESC
+     LIMIT 200`,
+  )
+    .bind(mailboxId, folder)
+    .all<MessageRecord>();
+  return rows.results ?? [];
+}
+
 export async function getInboxMessage(
   env: Env,
   mailboxId: string,
@@ -145,13 +166,24 @@ export async function getInboxMessage(
     .first<MessageRecord>();
 }
 
+export async function getMailboxMessage(
+  env: Env,
+  mailboxId: string,
+  messageId: string,
+): Promise<MessageRecord | null> {
+  return env.DB.prepare(
+    `SELECT ${MESSAGE_COLUMNS} FROM messages
+     WHERE id = ?1 AND mailbox_id = ?2`,
+  )
+    .bind(messageId, mailboxId)
+    .first<MessageRecord>();
+}
+
 export async function getMessageById(
   env: Env,
   messageId: string,
 ): Promise<MessageRecord | null> {
-  return env.DB.prepare(
-    `SELECT ${MESSAGE_COLUMNS} FROM messages WHERE id = ?1 AND folder = 'inbox'`,
-  )
+  return env.DB.prepare(`SELECT ${MESSAGE_COLUMNS} FROM messages WHERE id = ?1`)
     .bind(messageId)
     .first<MessageRecord>();
 }
@@ -201,11 +233,242 @@ export async function trashMessage(
 ): Promise<boolean> {
   const result = await env.DB.prepare(
     `UPDATE messages SET folder = 'trash'
-     WHERE id = ?1 AND mailbox_id = ?2 AND folder = 'inbox'`,
+     WHERE id = ?1 AND mailbox_id = ?2 AND folder != 'trash'`,
   )
     .bind(messageId, mailboxId)
     .run();
   return (result.meta.changes ?? 0) > 0;
+}
+
+export async function moveMessage(
+  env: Env,
+  mailboxId: string,
+  messageId: string,
+  folder: SystemFolder,
+): Promise<boolean> {
+  const result = await env.DB.prepare(
+    `UPDATE messages SET folder = ?3
+     WHERE id = ?1 AND mailbox_id = ?2`,
+  )
+    .bind(messageId, mailboxId, folder)
+    .run();
+  return (result.meta.changes ?? 0) > 0;
+}
+
+export async function insertDraft(
+  env: Env,
+  mailbox: MailboxRecord,
+  fields: DraftFields,
+  now = Date.now(),
+): Promise<MessageRecord> {
+  const id = crypto.randomUUID();
+  const row = draftRecord(id, mailbox, fields, now, now);
+  await insertMessage(env, row);
+  return row;
+}
+
+export async function updateDraft(
+  env: Env,
+  mailbox: MailboxRecord,
+  messageId: string,
+  fields: DraftFields,
+  now = Date.now(),
+): Promise<MessageRecord | null> {
+  const existing = await getMailboxMessage(env, mailbox.id, messageId);
+  if (!existing || existing.folder !== "draft") {
+    return null;
+  }
+  const row = draftRecord(existing.id, mailbox, fields, now, existing.created_at);
+  const result = await env.DB.prepare(
+    `UPDATE messages
+     SET envelope_from = ?3, envelope_to = ?4, subject = ?5, snippet = ?6,
+         body_text = ?7, header_cc = ?8, in_reply_to = ?9, references_header = ?10,
+         received_at = ?11
+     WHERE id = ?1 AND mailbox_id = ?2 AND folder = 'draft'`,
+  )
+    .bind(
+      existing.id,
+      mailbox.id,
+      row.envelope_from,
+      row.envelope_to,
+      row.subject,
+      row.snippet,
+      row.body_text,
+      row.header_cc,
+      row.in_reply_to,
+      row.references_header,
+      row.received_at,
+    )
+    .run();
+  if ((result.meta.changes ?? 0) === 0) {
+    return null;
+  }
+  return row;
+}
+
+export async function insertSentMessage(
+  env: Env,
+  mailbox: MailboxRecord,
+  fields: {
+    to: string;
+    cc: string;
+    subject: string;
+    text: string;
+    inReplyTo: string | null;
+    references: string | null;
+  },
+  now = Date.now(),
+): Promise<MessageRecord> {
+  const id = crypto.randomUUID();
+  const row = sentRecord(id, mailbox, fields, now, now);
+  await insertMessage(env, row);
+  return row;
+}
+
+export async function promoteDraftToSent(
+  env: Env,
+  mailbox: MailboxRecord,
+  draftId: string,
+  fields: {
+    to: string;
+    cc: string;
+    subject: string;
+    text: string;
+    inReplyTo: string | null;
+    references: string | null;
+  },
+  now = Date.now(),
+): Promise<MessageRecord | null> {
+  const existing = await getMailboxMessage(env, mailbox.id, draftId);
+  if (!existing || existing.folder !== "draft") {
+    return null;
+  }
+  const row = sentRecord(existing.id, mailbox, fields, now, existing.created_at);
+  const result = await env.DB.prepare(
+    `UPDATE messages
+     SET folder = 'sent', envelope_from = ?3, envelope_to = ?4, subject = ?5,
+         snippet = ?6, body_text = ?7, header_cc = ?8, in_reply_to = ?9,
+         references_header = ?10, is_read = 1, received_at = ?11
+     WHERE id = ?1 AND mailbox_id = ?2 AND folder = 'draft'`,
+  )
+    .bind(
+      existing.id,
+      mailbox.id,
+      row.envelope_from,
+      row.envelope_to,
+      row.subject,
+      row.snippet,
+      row.body_text,
+      row.header_cc,
+      row.in_reply_to,
+      row.references_header,
+      row.received_at,
+    )
+    .run();
+  if ((result.meta.changes ?? 0) === 0) {
+    return null;
+  }
+  return row;
+}
+
+export async function insertMessage(env: Env, row: MessageRecord): Promise<void> {
+  await env.DB.prepare(
+    `INSERT INTO messages (
+       id, mailbox_id, rfc_message_id, envelope_from, envelope_to,
+       subject, snippet, body_text, header_to, header_cc, header_reply_to,
+       in_reply_to, references_header, size_bytes, is_read, is_starred, folder,
+       received_at, created_at
+     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)`,
+  )
+    .bind(
+      row.id,
+      row.mailbox_id,
+      row.rfc_message_id,
+      row.envelope_from,
+      row.envelope_to,
+      row.subject,
+      row.snippet,
+      row.body_text,
+      row.header_to,
+      row.header_cc,
+      row.header_reply_to,
+      row.in_reply_to,
+      row.references_header,
+      row.size_bytes,
+      row.is_read,
+      row.is_starred,
+      row.folder,
+      row.received_at,
+      row.created_at,
+    )
+    .run();
+}
+
+function draftRecord(
+  id: string,
+  mailbox: MailboxRecord,
+  fields: DraftFields,
+  receivedAt: number,
+  createdAt: number,
+): MessageRecord {
+  return {
+    id,
+    mailbox_id: mailbox.id,
+    rfc_message_id: null,
+    envelope_from: mailbox.address,
+    envelope_to: fields.to.trim(),
+    subject: fields.subject,
+    snippet: snippetFromBody(fields.text) || snippetFromBody(fields.subject),
+    body_text: fields.text,
+    header_to: fields.to.trim() || null,
+    header_cc: fields.cc.trim() || null,
+    header_reply_to: null,
+    in_reply_to: fields.inReplyTo,
+    references_header: fields.references,
+    size_bytes: fields.text.length,
+    is_read: 1,
+    is_starred: 0,
+    folder: "draft",
+    received_at: receivedAt,
+    created_at: createdAt,
+  };
+}
+
+function sentRecord(
+  id: string,
+  mailbox: MailboxRecord,
+  fields: {
+    to: string;
+    cc: string;
+    subject: string;
+    text: string;
+    inReplyTo: string | null;
+    references: string | null;
+  },
+  receivedAt: number,
+  createdAt: number,
+): MessageRecord {
+  return {
+    id,
+    mailbox_id: mailbox.id,
+    rfc_message_id: null,
+    envelope_from: mailbox.address,
+    envelope_to: fields.to,
+    subject: fields.subject || null,
+    snippet: snippetFromBody(fields.text) || snippetFromBody(fields.subject),
+    body_text: fields.text,
+    header_to: fields.to || null,
+    header_cc: fields.cc || null,
+    header_reply_to: null,
+    in_reply_to: fields.inReplyTo,
+    references_header: fields.references,
+    size_bytes: fields.text.length,
+    is_read: 1,
+    is_starred: 0,
+    folder: "sent",
+    received_at: receivedAt,
+    created_at: createdAt,
+  };
 }
 
 export interface OutboundAttemptRecord {
