@@ -12,7 +12,7 @@ import {
   SEARCH_ENGINE_LIKE,
   type InboxFilter,
   type SearchEngine,
-} from "./triage";
+} from "./triage.ts";
 
 export interface MailboxRecord {
   id: string;
