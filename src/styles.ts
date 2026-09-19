@@ -401,6 +401,7 @@ textarea:focus-visible {
   font-size: var(--pg-text-sm);
   color: var(--pg-color-text);
   min-width: 0;
+  flex: 1 1 auto;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -434,6 +435,42 @@ textarea:focus-visible {
   border-radius: 50%;
   background: var(--pg-color-accent);
   vertical-align: middle;
+}
+
+.thread-count {
+  display: inline-block;
+  flex: 0 0 auto;
+  margin-left: auto;
+  min-width: 18px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--pg-color-surface-muted);
+  color: var(--pg-color-text-secondary);
+  font-size: var(--pg-text-xs);
+  font-weight: 650;
+  line-height: 18px;
+  text-align: center;
+}
+
+.msg.unread .thread-count {
+  background: var(--pg-color-accent);
+  color: #F7F5F0;
+}
+
+.thread-summary {
+  margin: 0 0 var(--pg-space-3);
+  color: var(--pg-color-text-secondary);
+  font-size: var(--pg-text-sm);
+}
+
+.thread-stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--pg-space-4);
+}
+
+.thread-item.current .read-card {
+  box-shadow: inset 3px 0 0 var(--pg-color-brand), var(--pg-shadow-sm);
 }
 
 .read,
