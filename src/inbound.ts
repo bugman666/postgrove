@@ -32,6 +32,11 @@ export async function handleInbound(message: InboundEmail, env: Env): Promise<vo
   const now = Date.now();
   const subject = header(message.headers, "subject");
   const rfcMessageId = header(message.headers, "message-id");
+  const headerTo = header(message.headers, "to");
+  const headerCc = header(message.headers, "cc");
+  const headerReplyTo = header(message.headers, "reply-to");
+  const inReplyTo = header(message.headers, "in-reply-to");
+  const referencesHeader = header(message.headers, "references");
   const rawBytes = new Uint8Array(await new Response(message.raw).arrayBuffer());
   const rawText = new TextDecoder("utf-8", { fatal: false, ignoreBOM: true }).decode(rawBytes);
   const { snippet, bodyText } = extractBodies(rawText);
@@ -55,8 +60,9 @@ export async function handleInbound(message: InboundEmail, env: Env): Promise<vo
     await env.DB.prepare(
       `INSERT INTO messages (
          id, mailbox_id, rfc_message_id, envelope_from, envelope_to,
-         subject, snippet, body_text, size_bytes, is_read, folder, received_at, created_at
-       ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, 'inbox', ?10, ?10)`,
+         subject, snippet, body_text, header_to, header_cc, header_reply_to,
+         in_reply_to, references_header, size_bytes, is_read, folder, received_at, created_at
+       ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, 0, 'inbox', ?15, ?15)`,
     )
       .bind(
         messageId,
@@ -67,6 +73,11 @@ export async function handleInbound(message: InboundEmail, env: Env): Promise<vo
         subject,
         snippet,
         bodyText,
+        headerTo,
+        headerCc,
+        headerReplyTo,
+        inReplyTo,
+        referencesHeader,
         message.rawSize,
         now,
       )

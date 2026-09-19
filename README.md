@@ -21,14 +21,14 @@ Open addresses on a domain you own, receive mail at the edge, read it in a web i
 1. Create one or more addresses on your domain
 2. Receive mail (Email Routing → Worker → D1)
 3. Read in a web inbox (list / open / delete; attachments in R2)
-4. Compose and send through a provider you control (reply later if we keep it)
+4. Compose and send through a provider you control, including reply / reply-all / forward
 5. Failures say what happened and what to do next (auth, missing outbound, routing)
 
 ## Out of scope (this milestone)
 
 - Throwaway / anonymous mailboxes
 - Calendar, contacts, or replacing a full IMAP/SMTP stack
-- Real reply / reply-all / forward (the inbox shows a reply entry only)
+- Conversation threading (list grouping) — reply headers are set; the thread UI is later
 - Attachments on send
 - Multi-user / RBAC / per-address passwords (one shared `OWNER_TOKEN` until then)
 
@@ -49,7 +49,7 @@ Capability ideas drawn from mainstream mail UX (e.g. Gmail), Cloudflare edge mai
 
 | Phase | Focus | Highlights |
 |-------|--------|------------|
-| **P0 MVP** | Edge mailbox core | Inbound → D1, web inbox, compose/send, R2 attachments, simple auth; reply **UI stub only** |
+| **P0 MVP** | Edge mailbox core | Inbound → D1, web inbox, compose/send, R2 attachments, simple auth |
 | **P1** | Mailbox completeness | Reply / reply-all / forward, folders + drafts + sent, search / unread / star, basic threads |
 | **P2** | Platform | Multi-user + RBAC/quotas, inbound webhooks/forward, open REST + abuse controls, light analytics, i18n, soft branding |
 | **P3** | Dev API (own domain) | Wait-for-message / OTP helpers, `+` aliases, API keys & quotas — **not** multi-provider disposable mail hubs |
@@ -58,7 +58,7 @@ See Issues under milestones `P0-MVP` … `P3-dev-api`. Longer write-ups: [produc
 
 ## Status
 
-P0 inbox on the Worker: list / read / delete against D1, inbound attachments in R2, plus compose/send behind the owner session. Outbound is pluggable (`stub` / `resend` / `http`). Reply is a visible entry only (no send). Outbound send attachments are a later follow-up. Light-editorial brand art (paper + forest green) lives in [`docs/assets/`](docs/assets/).
+P0 inbox on the Worker: list / read / delete against D1, inbound attachments in R2, plus compose/send behind the owner session. Outbound is pluggable (`stub` / `resend` / `http`). Reply / reply-all / forward prefill compose and send through the same adapters (In-Reply-To / References on reply). Outbound send attachments are a later follow-up. Light-editorial brand art (paper + forest green) lives in [`docs/assets/`](docs/assets/).
 
 ## Local development
 
@@ -85,7 +85,7 @@ Seeded addresses:
 
 | Address | What you should see after login |
 |---------|---------------------|
-| `inbox@example.test` | Four sample messages, including one with a downloadable attachment |
+| `inbox@example.test` | Five sample messages, including one with a downloadable attachment and one group thread for reply-all |
 | `empty@example.test` | Empty-inbox copy |
 
 Direct links (same origin as `wrangler dev`):
@@ -93,7 +93,7 @@ Direct links (same origin as `wrangler dev`):
 - Inbox with mail: [http://127.0.0.1:8787/box/11111111-1111-4111-8111-111111111111](http://127.0.0.1:8787/box/11111111-1111-4111-8111-111111111111)
 - Empty box: [http://127.0.0.1:8787/box/11111111-1111-4111-8111-111111111112](http://127.0.0.1:8787/box/11111111-1111-4111-8111-111111111112)
 
-Open a row to read the body. An unread row becomes read. Delete moves the row to `trash` (it leaves the inbox list; there is no trash folder UI yet). The **回复** control only shows a placeholder — it does not send mail. The seeded 「本地附件种子」row lists `grove-note.txt`; the owner session can download it from `/attachments/33333333-3333-4333-8333-333333333331`. **写信** is a real form (to / subject / body). With `OUTBOUND_PROVIDER=stub` (the example `.dev.vars`) a submit records the attempt in D1 and does not leave the box.
+Open a row to read the body. An unread row becomes read. Delete moves the row to `trash` (it leaves the inbox list; there is no trash folder UI yet). **回复** / **全部回复** / **转发** open `/compose` with the original message prefilled. Reply sets `To` to the sender, `Re:` on the subject, and `In-Reply-To` / `References` from the stored Message-ID chain. Reply-all puts the original sender plus original To/Cc in To (deduped, minus this mailbox). Forward uses `Fwd:` and quotes the original headers/body; you still pick the new recipient. The seeded 「本地附件种子」row lists `grove-note.txt`; the owner session can download it from `/attachments/33333333-3333-4333-8333-333333333331`. **写信** is a real form (to / cc / subject / body). With `OUTBOUND_PROVIDER=stub` (the example `.dev.vars`) a submit records the attempt in D1 and does not leave the box.
 
 JSON against the same seeded rows (cookie from `POST /auth/login`):
 
@@ -171,7 +171,7 @@ Expect JSON with `"ok": true` and `"db": "ready"` after migrations. A `503` with
 
 ### Compose and outbound
 
-`GET`/`POST /compose` and `POST /api/send` call `requireOwner` (same session cookie as Inbox, including the Origin/Referer check on POST). Without a session they return **401** (HTML login page for `/compose`, JSON `unauthorized` + hint for `/api/send`).
+`GET`/`POST /compose` and `POST /api/send` call `requireOwner` (same session cookie as Inbox, including the Origin/Referer check on POST). Without a session they return **401** (HTML login page for `/compose`, JSON `unauthorized` + hint for `/api/send`). Reply prefills live at `GET /compose?mode=reply|reply-all|forward&message=<id>` and `GET /api/messages/:id/compose?mode=…`.
 
 Local example uses `OUTBOUND_PROVIDER=stub`: the adapter records the attempt and returns success without sending. Real providers fail **loud** when config is missing or the key is rejected — the row is stored as `failed` and the compose page shows the error plus the next step.
 
@@ -180,7 +180,7 @@ Local example uses `OUTBOUND_PROVIDER=stub`: the adapter records the attempt and
 | `OUTBOUND_PROVIDER` | `stub` · `resend` · `http`. Unset → send fails with an actionable hint |
 | `RESEND_API_KEY` | Required for `resend` |
 | `RESEND_FROM` | Optional From override (verified domain) |
-| `OUTBOUND_HTTP_URL` | Required for `http` (POST JSON `{from,to,subject,text}`) |
+| `OUTBOUND_HTTP_URL` | Required for `http` (POST JSON `{from,to,subject,text}`; optional `cc`, `headers`, `in_reply_to`, `references`) |
 | `OUTBOUND_HTTP_TOKEN` | Optional Bearer for the HTTP hook |
 | `OUTBOUND_FROM` | Optional From override for any provider |
 
@@ -189,6 +189,13 @@ Local example uses `OUTBOUND_PROVIDER=stub`: the adapter records the attempt and
 curl -sS -b /tmp/pg-cookies -X POST http://127.0.0.1:8787/api/send \
   -H 'content-type: application/json' \
   -d '{"to":"neighbor@example.test","subject":"hello","text":"from local stub"}'
+
+curl -sS -b /tmp/pg-cookies \
+  'http://127.0.0.1:8787/api/messages/22222222-2222-4222-8222-222222222225/compose?mode=reply-all'
+
+curl -sS -b /tmp/pg-cookies -X POST http://127.0.0.1:8787/api/send \
+  -H 'content-type: application/json' \
+  -d '{"to":"lead@grove.test","cc":"teammate@grove.test, notes@grove.test","subject":"Re: 本周同步","text":"ack","in_reply_to":"<seed-sync@example.test>","references":"<seed-sync-root@example.test> <seed-sync@example.test>"}'
 
 curl -sS -b /tmp/pg-cookies http://127.0.0.1:8787/api/outbound/attempts
 ```
@@ -306,13 +313,15 @@ Then, in the Cloudflare dashboard, enable Email Routing for your domain and add 
 | `src/attachments.ts` | R2 store / owner download / read-view links |
 | `src/mime.ts` | Plain-text body extract + inbound MIME attachments |
 | `src/api.ts` | JSON list / read / delete / send |
-| `src/ui.ts` | Inbox HTML + compose form |
+| `src/ui.ts` | Inbox HTML + compose / reply / forward form |
+| `src/reply.ts` | Reply / reply-all / forward prefill + header helpers |
 | `src/outbound.ts` | Pluggable outbound adapters (`stub` / `resend` / `http`) |
 | `src/send.ts` | Validate + persist outbound attempts |
 | `migrations/0001_init.sql` | D1 `mailboxes` + `messages` |
 | `migrations/0002_message_body.sql` | `messages.body_text` |
 | `migrations/0003_outbound_attempts.sql` | D1 `outbound_attempts` |
 | `migrations/0004_attachments.sql` | D1 `attachments` metadata (bytes in R2) |
+| `migrations/0005_reply_headers.sql` | Inbound To/Cc/Reply-To/References + outbound attempt headers |
 | `scripts/seed-local.sql` | Local sample mailboxes + messages (not for remote) |
 | `scripts/seed-grove-note.txt` | Local sample attachment bytes |
 | `wrangler.jsonc` | Worker + D1 + R2 bindings (placeholders) |

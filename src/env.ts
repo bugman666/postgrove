@@ -14,7 +14,7 @@ export interface Env {
   RESEND_API_KEY?: string;
   /** Optional From override for Resend (verified domain). */
   RESEND_FROM?: string;
-  /** Required when OUTBOUND_PROVIDER=http. POST JSON {from,to,subject,text}. */
+  /** Required when OUTBOUND_PROVIDER=http. POST JSON {from,to,subject,text} plus optional cc/headers. */
   OUTBOUND_HTTP_URL?: string;
   /** Optional Bearer token for the HTTP outbound hook. */
   OUTBOUND_HTTP_TOKEN?: string;

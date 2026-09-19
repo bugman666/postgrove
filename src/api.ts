@@ -1,6 +1,7 @@
 import type { Env } from "./env";
 import { requireOwner, type OwnerPrincipal } from "./auth";
 import { forbiddenJson, json, methodNotAllowed, notFoundJson } from "./http";
+import { buildComposePrefill, parseComposeMode } from "./reply";
 import { parseSendFields, sendOutbound } from "./send";
 import {
   getInboxMessage,
@@ -84,6 +85,14 @@ export async function handleApi(
     });
   }
 
+  const composeMatch = path.match(/^\/api\/messages\/([^/]+)\/compose$/);
+  if (composeMatch) {
+    if (method !== "GET") {
+      return methodNotAllowed("GET");
+    }
+    return composePrefill(env, owner, decodeURIComponent(composeMatch[1]), url);
+  }
+
   const oneMessage = path.match(/^\/api\/messages\/([^/]+)$/);
   if (oneMessage) {
     const messageId = decodeURIComponent(oneMessage[1]);
@@ -117,7 +126,7 @@ async function sendMessage(
       {
         ok: false,
         error: "invalid_request",
-        hint: "Send JSON { \"to\", \"subject\", \"text\" }.",
+        hint: "Send JSON { \"to\", \"subject\", \"text\" } (optional cc, in_reply_to, references).",
       },
       400,
     );
@@ -127,7 +136,7 @@ async function sendMessage(
       {
         ok: false,
         error: "invalid_request",
-        hint: "Send JSON { \"to\", \"subject\", \"text\" }.",
+        hint: "Send JSON { \"to\", \"subject\", \"text\" } (optional cc, in_reply_to, references).",
       },
       400,
     );
@@ -156,7 +165,10 @@ function publicAttempt(row: OutboundAttemptRecord) {
     mailbox_id: row.mailbox_id,
     from: row.from_address,
     to: row.to_address,
+    cc: row.cc_address,
     subject: row.subject,
+    in_reply_to: row.in_reply_to,
+    references: row.references_header,
     provider: row.provider,
     status: row.status,
     error: row.error,
@@ -186,6 +198,50 @@ async function readMessage(
     return notFoundJson();
   }
   return json({ ok: true, message: publicMessageDetail(message) });
+}
+
+async function composePrefill(
+  env: Env,
+  owner: OwnerPrincipal,
+  messageId: string,
+  url: URL,
+): Promise<Response> {
+  const existing = await getMessageById(env, messageId);
+  if (!existing) {
+    return notFoundJson();
+  }
+  if (existing.mailbox_id !== owner.mailboxId) {
+    return forbiddenJson();
+  }
+  const mailbox = await getMailbox(env, owner.mailboxId);
+  if (!mailbox) {
+    return notFoundJson();
+  }
+  const mode = parseComposeMode(url.searchParams.get("mode"));
+  if (mode === "new") {
+    return json(
+      {
+        ok: false,
+        error: "invalid_request",
+        hint: "mode must be reply, reply-all, or forward.",
+      },
+      400,
+    );
+  }
+  const draft = buildComposePrefill(existing, mailbox.address, mode);
+  return json({
+    ok: true,
+    mode,
+    message_id: existing.id,
+    draft: {
+      to: draft.to,
+      cc: draft.cc,
+      subject: draft.subject,
+      text: draft.body,
+      in_reply_to: draft.inReplyTo || null,
+      references: draft.references || null,
+    },
+  });
 }
 
 async function deleteMessage(
@@ -238,6 +294,11 @@ function publicMessageDetail(row: MessageRecord) {
     ...publicMessageListItem(row),
     rfc_message_id: row.rfc_message_id,
     body_text: row.body_text,
+    header_to: row.header_to,
+    header_cc: row.header_cc,
+    header_reply_to: row.header_reply_to,
+    in_reply_to: row.in_reply_to,
+    references: row.references_header,
     folder: row.folder,
     size_bytes: row.size_bytes,
   };

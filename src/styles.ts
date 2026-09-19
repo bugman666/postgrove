@@ -448,6 +448,11 @@ textarea:focus-visible {
   color: var(--pg-color-text);
 }
 
+.compose-input::placeholder,
+.compose-body::placeholder {
+  color: var(--pg-color-text-tertiary);
+}
+
 .compose-body {
   width: 100%;
   min-height: 240px;

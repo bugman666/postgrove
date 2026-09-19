@@ -8,6 +8,13 @@ import { requireOwner, type OwnerPrincipal } from "./auth";
 import { html, redirect } from "./http";
 import { EMPTY_ART, GROVE_MARK, escapeHtml, formatReceived } from "./html";
 import { describeOutbound } from "./outbound";
+import {
+  buildComposePrefill,
+  composeHeading,
+  parseComposeMode,
+  type ComposeMode,
+  type ComposePrefill,
+} from "./reply";
 import { parseSendFields, sendOutbound } from "./send";
 import {
   getInboxMessage,
@@ -26,8 +33,11 @@ type NavId = "inbox" | "compose" | "addresses" | "settings";
 
 interface ComposeForm {
   to: string;
+  cc: string;
   subject: string;
   body: string;
+  inReplyTo: string;
+  references: string;
 }
 
 export async function handleUi(
@@ -118,8 +128,10 @@ export async function handleUi(
     const message = (await getInboxMessage(env, mailbox.id, existing.id)) ?? existing;
     const messages = await listInboxMessages(env, mailbox.id);
     const attachments = await listMessageAttachments(env, mailbox.id, message.id);
-    const showReply = url.searchParams.get("reply") === "1";
-    return html(renderInboxPage(mailbox, messages, message, { showReply, attachments }));
+    if (url.searchParams.get("reply") === "1") {
+      return redirect(composeHref(mailbox, "reply", message.id));
+    }
+    return html(renderInboxPage(mailbox, messages, message, { attachments }));
   }
 
   const boxMatch = path.match(/^\/box\/([^/]+)$/);
@@ -222,19 +234,37 @@ async function handleComposeSubmit(
     const record = body && typeof body === "object" ? (body as Record<string, unknown>) : {};
     form = {
       to: typeof record.to === "string" ? record.to : "",
+      cc: typeof record.cc === "string" ? record.cc : "",
       subject: typeof record.subject === "string" ? record.subject : "",
       body: typeof record.text === "string" ? record.text : typeof record.body === "string" ? record.body : "",
+      inReplyTo:
+        typeof record.in_reply_to === "string"
+          ? record.in_reply_to
+          : typeof record.inReplyTo === "string"
+            ? record.inReplyTo
+            : "",
+      references: typeof record.references === "string" ? record.references : "",
     };
   } else {
     const data = await request.formData();
     form = {
       to: stringField(data.get("to")),
+      cc: stringField(data.get("cc")),
       subject: stringField(data.get("subject")),
       body: stringField(data.get("body")),
+      inReplyTo: stringField(data.get("in_reply_to")),
+      references: stringField(data.get("references")),
     };
   }
 
-  const parsed = parseSendFields({ to: form.to, subject: form.subject, text: form.body });
+  const parsed = parseSendFields({
+    to: form.to,
+    cc: form.cc,
+    subject: form.subject,
+    text: form.body,
+    in_reply_to: form.inReplyTo,
+    references: form.references,
+  });
   if (!parsed.ok) {
     return html(
       renderComposePage(env, ownMailbox, {
@@ -261,11 +291,29 @@ async function renderCompose(
   const attemptId = url.searchParams.get("attempt");
   const highlighted =
     mailbox && attemptId ? await getOutboundAttempt(env, mailbox.id, attemptId) : null;
+  const mode = parseComposeMode(url.searchParams.get("mode"));
+  const messageId = url.searchParams.get("message");
+  let form = emptyComposeForm();
+  let formError: string | undefined;
+  let prefill: ComposePrefill | null = null;
+
+  if (mailbox && messageId && mode !== "new") {
+    const source = await getInboxMessage(env, mailbox.id, messageId);
+    if (!source) {
+      formError = "找不到要回复或转发的原信。回到收件箱再试一次。";
+    } else {
+      prefill = buildComposePrefill(source, mailbox.address, mode);
+      form = formFromPrefill(prefill);
+    }
+  }
+
   return html(
     renderComposePage(env, mailbox, {
-      form: emptyComposeForm(),
+      form,
+      formError,
       highlighted,
       attempts,
+      mode: prefill?.mode ?? (highlighted ? "new" : mode),
     }),
   );
 }
@@ -275,7 +323,18 @@ function stringField(value: unknown): string {
 }
 
 function emptyComposeForm(): ComposeForm {
-  return { to: "", subject: "", body: "" };
+  return { to: "", cc: "", subject: "", body: "", inReplyTo: "", references: "" };
+}
+
+function formFromPrefill(prefill: ComposePrefill): ComposeForm {
+  return {
+    to: prefill.to,
+    cc: prefill.cc,
+    subject: prefill.subject,
+    body: prefill.body,
+    inReplyTo: prefill.inReplyTo,
+    references: prefill.references,
+  };
 }
 
 function pageMethodNotAllowed(): Response {
@@ -301,11 +360,30 @@ function withMailbox(path: string, mailbox: MailboxRecord | null): string {
   return `${path}?mailbox=${encodeURIComponent(mailbox.id)}`;
 }
 
+function composeHref(
+  mailbox: MailboxRecord | null,
+  mode: ComposeMode = "new",
+  messageId?: string,
+): string {
+  const params = new URLSearchParams();
+  if (mailbox) {
+    params.set("mailbox", mailbox.id);
+  }
+  if (mode !== "new") {
+    params.set("mode", mode);
+  }
+  if (messageId) {
+    params.set("message", messageId);
+  }
+  const query = params.toString();
+  return query ? `/compose?${query}` : "/compose";
+}
+
 function renderInboxPage(
   mailbox: MailboxRecord,
   messages: MessageRecord[],
   selected: MessageRecord | null,
-  flags: { showReply?: boolean; deleted?: boolean; attachments?: AttachmentRecord[] },
+  flags: { deleted?: boolean; attachments?: AttachmentRecord[] },
 ): string {
   const list = messages.length === 0
     ? emptyBlock("还没有信。域名路由配好后，寄一封到你的地址试试。")
@@ -316,7 +394,6 @@ function renderInboxPage(
     reading = renderReading(
       mailbox,
       selected,
-      Boolean(flags.showReply),
       flags.attachments ?? [],
     );
   } else {
@@ -371,18 +448,15 @@ function messageRow(
 function renderReading(
   mailbox: MailboxRecord,
   message: MessageRecord,
-  showReply: boolean,
   attachments: AttachmentRecord[] = [],
 ): string {
   const subject = message.subject?.trim() ? message.subject : "（无主题）";
   const body = message.body_text?.trim()
     ? escapeHtml(message.body_text)
     : "（没有正文）";
-  const replyHref = `${messagePath(mailbox.id, message.id)}?reply=1`;
-  const composeHref = withMailbox("/compose", mailbox);
-  const replyBanner = showReply
-    ? `<p class="banner reply">回复能力将在下一阶段开放；你仍可以<a href="${escapeHtml(composeHref)}">新建写信</a>。</p>`
-    : "";
+  const replyHref = composeHref(mailbox, "reply", message.id);
+  const replyAllHref = composeHref(mailbox, "reply-all", message.id);
+  const forwardHref = composeHref(mailbox, "forward", message.id);
 
   return `<div class="read-inner">
     <a class="back" href="${escapeHtml(boxPath(mailbox.id))}">← 收件箱</a>
@@ -393,15 +467,17 @@ function renderReading(
       <div class="meta">
         <div>发件人 <span class="mono">${escapeHtml(message.envelope_from)}</span></div>
         <div>收件人 <span class="mono">${escapeHtml(message.envelope_to)}</span></div>
+        ${message.header_cc ? `<div>抄送 <span class="mono">${escapeHtml(message.header_cc)}</span></div>` : ""}
         <div>时间 ${escapeHtml(formatReceived(message.received_at))}</div>
       </div>
       <div class="actions">
         <a class="btn btn-primary" href="${escapeHtml(replyHref)}">回复</a>
+        <a class="btn" href="${escapeHtml(replyAllHref)}">全部回复</a>
+        <a class="btn" href="${escapeHtml(forwardHref)}">转发</a>
         <form method="post" action="${escapeHtml(`${messagePath(mailbox.id, message.id)}/delete`)}" onsubmit="return confirm('删除后这封信会离开收件箱。确定删除？');">
           <button class="btn btn-danger" type="submit">删除</button>
         </form>
       </div>
-      ${replyBanner}
       ${renderAttachmentsHtml(attachments)}
       <pre class="body">${body}</pre>
     </article>
@@ -416,9 +492,12 @@ function renderComposePage(
     formError?: string;
     highlighted?: OutboundAttemptRecord | null;
     attempts: OutboundAttemptRecord[];
+    mode?: ComposeMode;
   },
 ): string {
   const outbound = describeOutbound(env);
+  const mode = opts.mode ?? "new";
+  const heading = composeHeading(mode);
   const banners: string[] = [];
   if (opts.highlighted) {
     banners.push(attemptBanner(opts.highlighted));
@@ -426,6 +505,11 @@ function renderComposePage(
   if (opts.formError) {
     banners.push(
       `<p class="banner danger">${escapeHtml(opts.formError)}</p>`,
+    );
+  }
+  if (!opts.highlighted && mode !== "new") {
+    banners.push(
+      `<p class="banner reply">${escapeHtml(heading)}会走现有出站通道。可改收件人或正文后再发送。</p>`,
     );
   }
   if (!opts.highlighted && outbound.provider === "unset") {
@@ -438,11 +522,21 @@ function renderComposePage(
     ? `<p class="from-line">发件人 <span class="mono">${escapeHtml(mailbox.address)}</span></p>`
     : `<p class="banner danger">没有可用地址。确认本地已经 migrate 并且 seed。</p>`;
 
+  const threadLine = opts.form.inReplyTo
+    ? `<p class="from-line">引用 <span class="mono">In-Reply-To: ${escapeHtml(opts.form.inReplyTo)}</span></p>`
+    : "";
+
   const disabled = mailbox ? "" : " disabled";
   const form = `<form id="compose-form" class="compose-form" method="post" action="${escapeHtml(withMailbox("/compose", mailbox))}">
       ${fromLine}
+      ${threadLine}
+      <input type="hidden" name="in_reply_to" value="${escapeHtml(opts.form.inReplyTo)}">
+      <input type="hidden" name="references" value="${escapeHtml(opts.form.references)}">
       <label>收件人
-        <input class="search compose-input" name="to" type="email" autocomplete="email" required value="${escapeHtml(opts.form.to)}"${disabled}>
+        <input class="search compose-input" name="to" type="text" inputmode="email" autocomplete="email" placeholder="neighbor@example.test" required value="${escapeHtml(opts.form.to)}"${disabled}>
+      </label>
+      <label>抄送
+        <input class="search compose-input" name="cc" type="text" inputmode="email" autocomplete="email" placeholder="可选，多人用逗号分隔" value="${escapeHtml(opts.form.cc)}"${disabled}>
       </label>
       <label>主题
         <input class="search compose-input" name="subject" type="text" maxlength="998" value="${escapeHtml(opts.form.subject)}"${disabled}>
@@ -469,13 +563,13 @@ function renderComposePage(
   const history = renderAttemptHistory(opts.attempts, opts.highlighted?.id ?? null);
 
   return layout({
-    title: "写信 · Postgrove",
+    title: `${heading} · Postgrove`,
     nav: "compose",
     mailbox,
     mode: "list",
     simple: true,
     body: `<main class="page"><div class="page-inner">
-      <div class="page-head"><h1>写信</h1></div>
+      <div class="page-head"><h1>${escapeHtml(heading)}</h1></div>
       <div class="page-card">${banners.join("")}${form}${history}</div>
     </div></main>`,
   });
@@ -513,7 +607,9 @@ function renderAttemptHistory(
           <time datetime="${escapeHtml(new Date(row.created_at).toISOString())}">${escapeHtml(formatReceived(row.created_at))}</time>
         </div>
         <div>收件人 <span class="mono">${escapeHtml(row.to_address)}</span></div>
+        ${row.cc_address ? `<div>抄送 <span class="mono">${escapeHtml(row.cc_address)}</span></div>` : ""}
         <div>主题 ${escapeHtml(subject)}</div>
+        ${row.in_reply_to ? `<div>引用 <span class="mono">${escapeHtml(row.in_reply_to)}</span></div>` : ""}
         <div>提供商 <span class="mono">${escapeHtml(row.provider)}</span></div>
         ${row.hint ? `<p class="attempt-hint">${escapeHtml(row.hint)}</p>` : ""}
       </li>`;

@@ -28,11 +28,20 @@ export async function sendOutbound(
   input: SendInput,
 ): Promise<SendOutcome> {
   const from = outboundFromAddress(env, mailbox.address);
+  const headers: OutboundDraft["headers"] = {};
+  if (input.inReplyTo) {
+    headers["In-Reply-To"] = input.inReplyTo;
+  }
+  if (input.references) {
+    headers.References = input.references;
+  }
   const draft: OutboundDraft = {
     from,
     to: input.to,
+    cc: input.cc || undefined,
     subject: input.subject,
     text: input.text,
+    headers: Object.keys(headers).length > 0 ? headers : undefined,
   };
 
   const resolved = resolveOutboundAdapter(env);
@@ -87,8 +96,11 @@ async function persist(
     mailbox_id: mailboxId,
     from_address: draft.from,
     to_address: draft.to,
+    cc_address: draft.cc || null,
     subject: draft.subject || null,
     body_text: draft.text || null,
+    in_reply_to: draft.headers?.["In-Reply-To"] ?? null,
+    references_header: draft.headers?.References ?? null,
     provider: fields.provider,
     status: fields.status,
     error: fields.error,
