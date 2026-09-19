@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import { beforeEach, test } from "node:test";
+import { handleAdmin } from "../src/admin.ts";
+import { handleApi } from "../src/api.ts";
 import { insertApiToken } from "../src/api-tokens.ts";
-import { OWNER_SESSION_COOKIE, signOwnerSession } from "../src/auth.ts";
+import { handleAuthRoutes, OWNER_SESSION_COOKIE, signOwnerSession } from "../src/auth.ts";
 import type { Env } from "../src/env.ts";
-import worker from "../src/index.ts";
 import { resetRateLimitForTests } from "../src/rate-limit.ts";
+import { handleRestRoutes } from "../src/rest.ts";
 
 const SECRET = "change-me-local-session-secret";
 const OWNER = "change-me-local-owner-token";
@@ -156,8 +158,24 @@ function env(db: MemoryD1, overrides: Partial<Env> = {}): Env {
   };
 }
 
-function fetchWorker(request: Request, testEnv: Env): Promise<Response> {
-  return worker.fetch(request, testEnv);
+/** Same order as `src/index.ts` fetch (auth → REST → /api → /admin). */
+async function fetchWorker(request: Request, testEnv: Env): Promise<Response> {
+  const url = new URL(request.url);
+  const auth = await handleAuthRoutes(request, testEnv);
+  if (auth) {
+    return auth;
+  }
+  const rest = await handleRestRoutes(request, testEnv);
+  if (rest) {
+    return rest;
+  }
+  if (url.pathname.startsWith("/api/")) {
+    return handleApi(request, testEnv, url);
+  }
+  if (url.pathname === "/admin" || url.pathname.startsWith("/admin/")) {
+    return handleAdmin(request, testEnv, url);
+  }
+  throw new Error(`auth matrix does not cover ${url.pathname}`);
 }
 
 function bearer(token: string, url: string, init: RequestInit = {}): Request {
