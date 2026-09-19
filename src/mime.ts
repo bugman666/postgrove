@@ -15,7 +15,7 @@ export interface ParsedAttachment {
 export function extractBodies(rawText: string): ExtractedBody {
   const { headers, body } = splitMime(rawText);
   const contentType = headerValue(headers, "content-type") ?? "text/plain";
-  let text = textFromPart(body, contentType);
+  let text = textFromPart(headers, body, contentType);
   if (text) {
     text = text.replace(/\r\n/g, "\n").trim();
     if (text.length > BODY_MAX) {
@@ -77,7 +77,7 @@ function headerValue(headers: string, name: string): string | null {
   return null;
 }
 
-function textFromPart(body: string, contentType: string): string | null {
+function textFromPart(headers: string, body: string, contentType: string): string | null {
   if (/multipart\//i.test(contentType)) {
     const boundary = mimeBoundary(contentType);
     if (!boundary) {
@@ -90,25 +90,42 @@ function textFromPart(body: string, contentType: string): string | null {
       if (!trimmed || trimmed === "--") {
         continue;
       }
-      const { headers, body: partBody } = splitMime(trimmed);
-      const partType = headerValue(headers, "content-type") ?? "text/plain";
+      const { headers: partHeaders, body: partBody } = splitMime(trimmed);
+      const partType = headerValue(partHeaders, "content-type") ?? "text/plain";
       if (/text\/plain/i.test(partType)) {
-        const text = partBody.trim();
+        const text = decodePartText(partHeaders, partBody, partType).trim();
         if (text) {
           return text;
         }
       }
       if (!htmlFallback && /text\/html/i.test(partType)) {
-        htmlFallback = stripHtml(partBody);
+        htmlFallback = stripHtml(decodePartText(partHeaders, partBody, partType));
       }
     }
     return htmlFallback;
   }
+  const decoded = decodePartText(headers, body, contentType);
   if (/text\/html/i.test(contentType)) {
-    return stripHtml(body);
+    return stripHtml(decoded);
   }
-  const text = body.trim();
+  const text = decoded.trim();
   return text.length > 0 ? text : null;
+}
+
+/** Decode RFC 2045 CTE on a text part. 7bit/8bit stay as the already-decoded string. */
+function decodePartText(headers: string, body: string, contentType: string): string {
+  const encoding = headerValue(headers, "content-transfer-encoding") ?? "7bit";
+  const enc = encoding.split(";")[0]?.trim().toLowerCase() ?? "7bit";
+  if (enc !== "base64" && enc !== "quoted-printable") {
+    return body;
+  }
+  const bytes = decodeTransfer(body, encoding);
+  const charset = mimeParam(contentType, "charset") ?? "utf-8";
+  try {
+    return new TextDecoder(charset, { fatal: false, ignoreBOM: true }).decode(bytes);
+  } catch {
+    return new TextDecoder("utf-8", { fatal: false, ignoreBOM: true }).decode(bytes);
+  }
 }
 
 function mimeBoundary(contentType: string): string | null {
