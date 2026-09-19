@@ -43,6 +43,7 @@ Requires Node.js 18.17+ (20+ recommended). No Cloudflare account is needed for t
 npm install
 cp .dev.vars.example .dev.vars   # optional; no secrets required for this scaffold
 npm run db:migrate:local
+npm run db:seed:local            # sample mailbox inbox@example.test
 npm run dev
 ```
 
@@ -75,7 +76,7 @@ Hello from a local inbound test.
 '
 ```
 
-The stub writes a `mailboxes` row for an unseen recipient (scaffold convenience; later, addresses will be created through admin) and a `messages` row. Check Wrangler logs for `inbound stub: stored`. Inspect rows with:
+The stub only accepts recipients that already exist in `mailboxes` (create address first; unknown and disabled addresses are rejected). After the local seed, `inbox@example.test` is available. Check Wrangler logs for `inbound stub: stored`. Inspect rows with:
 
 ```bash
 npx wrangler d1 execute postgrove --local --command \
@@ -104,6 +105,7 @@ Then, in the Cloudflare dashboard, enable Email Routing for your domain and add 
 | `src/health.ts` | `GET /healthz` |
 | `src/inbound.ts` | Email Routing stub persist |
 | `migrations/0001_init.sql` | D1 `mailboxes` + `messages` |
+| `scripts/seed-local.sql` | Local sample mailbox (not for remote) |
 | `wrangler.jsonc` | Worker + D1 bindings (placeholders) |
 | `.dev.vars.example` | Local secret template |
 

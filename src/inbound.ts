@@ -22,24 +22,16 @@ export async function handleInbound(message: InboundEmail, env: Env): Promise<vo
     .bind(parsedTo.address)
     .first<{ id: string; status: string }>();
 
-  let mailboxId: string;
-  if (mailbox) {
-    if (mailbox.status !== "active") {
-      message.setReject("mailbox disabled");
-      return;
-    }
-    mailboxId = mailbox.id;
-  } else {
-    // Scaffold only: unseen recipients get a mailbox row so local tests can persist.
-    // Later, addresses will be created through admin before mail is accepted.
-    mailboxId = crypto.randomUUID();
-    await env.DB.prepare(
-      `INSERT INTO mailboxes (id, address, local_part, domain, display_name, status, created_at, updated_at)
-       VALUES (?1, ?2, ?3, ?4, NULL, 'active', ?5, ?5)`,
-    )
-      .bind(mailboxId, parsedTo.address, parsedTo.localPart, parsedTo.domain, now)
-      .run();
+  if (!mailbox) {
+    message.setReject("unknown mailbox");
+    return;
   }
+  if (mailbox.status !== "active") {
+    message.setReject("mailbox disabled");
+    return;
+  }
+
+  const mailboxId = mailbox.id;
 
   const messageId = crypto.randomUUID();
   try {
