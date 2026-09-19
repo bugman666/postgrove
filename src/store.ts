@@ -4,6 +4,7 @@ import {
   type DraftFields,
   type SystemFolder,
 } from "./folders.ts";
+import { chunkIds, sqlInPlaceholders, uniqueIds } from "./sql-in.ts";
 import type { InboxFilter } from "./triage";
 
 export interface MailboxRecord {
@@ -47,6 +48,11 @@ const MAILBOX_COLUMNS =
 
 const MESSAGE_COLUMNS = `id, mailbox_id, rfc_message_id, envelope_from, envelope_to,
   subject, snippet, body_text, header_to, header_cc, header_reply_to, in_reply_to,
+  references_header, size_bytes, is_read, is_starred, folder, received_at, created_at`;
+
+/** List/thread grouping columns — omit `body_text` so open-thread does not rescan full bodies. */
+const MESSAGE_HEAD_COLUMNS = `id, mailbox_id, rfc_message_id, envelope_from, envelope_to,
+  subject, snippet, header_to, header_cc, header_reply_to, in_reply_to,
   references_header, size_bytes, is_read, is_starred, folder, received_at, created_at`;
 
 export async function listMailboxes(env: Env): Promise<MailboxRecord[]> {
@@ -236,6 +242,41 @@ export async function listInboxMessages(
   mailboxId: string,
   query: InboxQuery = {},
 ): Promise<MessageRecord[]> {
+  return queryInboxMessages(env, mailboxId, query, MESSAGE_COLUMNS);
+}
+
+/** Inbox rows for list/thread grouping without selecting `body_text`. */
+export async function listInboxMessageHeads(
+  env: Env,
+  mailboxId: string,
+  query: InboxQuery = {},
+): Promise<MessageRecord[]> {
+  const rows = await queryInboxMessages(env, mailboxId, query, MESSAGE_HEAD_COLUMNS);
+  return rows.map((row) => ({ ...row, body_text: row.body_text ?? null }));
+}
+
+async function queryInboxMessages(
+  env: Env,
+  mailboxId: string,
+  query: InboxQuery,
+  columns: string,
+): Promise<MessageRecord[]> {
+  const { sql, binds } = inboxListWhere(mailboxId, query);
+  const rows = await env.DB.prepare(
+    `SELECT ${columns} FROM messages
+     WHERE ${sql}
+     ORDER BY received_at DESC, created_at DESC
+     LIMIT 200`,
+  )
+    .bind(...binds)
+    .all<MessageRecord>();
+  return rows.results ?? [];
+}
+
+function inboxListWhere(
+  mailboxId: string,
+  query: InboxQuery,
+): { sql: string; binds: (string | number)[] } {
   const filter = query.filter ?? "all";
   const q = (query.q ?? "").trim();
   const clauses = ["mailbox_id = ?1", "folder = 'inbox'"];
@@ -259,15 +300,29 @@ export async function listInboxMessages(
     binds.push(pattern, pattern, pattern, pattern);
   }
 
-  const rows = await env.DB.prepare(
-    `SELECT ${MESSAGE_COLUMNS} FROM messages
-     WHERE ${clauses.join(" AND ")}
-     ORDER BY received_at DESC, created_at DESC
-     LIMIT 200`,
-  )
-    .bind(...binds)
-    .all<MessageRecord>();
-  return rows.results ?? [];
+  return { sql: clauses.join(" AND "), binds };
+}
+
+export async function getMailboxMessagesByIds(
+  env: Env,
+  mailboxId: string,
+  messageIds: readonly string[],
+): Promise<MessageRecord[]> {
+  const found: MessageRecord[] = [];
+  for (const chunk of chunkIds(messageIds)) {
+    const placeholders = sqlInPlaceholders(2, chunk.length);
+    const rows = await env.DB.prepare(
+      `SELECT ${MESSAGE_COLUMNS} FROM messages
+       WHERE mailbox_id = ?1 AND id IN (${placeholders})`,
+    )
+      .bind(mailboxId, ...chunk)
+      .all<MessageRecord>();
+    found.push(...(rows.results ?? []));
+  }
+  const byId = new Map(found.map((row) => [row.id, row]));
+  return uniqueIds(messageIds)
+    .map((id) => byId.get(id))
+    .filter((row): row is MessageRecord => Boolean(row));
 }
 
 function likeContainsPattern(value: string): string {
@@ -341,6 +396,38 @@ export async function markRead(
   messageId: string,
 ): Promise<void> {
   await setRead(env, mailboxId, messageId, true);
+}
+
+/** One UPDATE per chunk instead of N mark-read statements. */
+export async function markReadMany(
+  env: Env,
+  mailboxId: string,
+  messageIds: readonly string[],
+): Promise<number> {
+  let changes = 0;
+  for (const chunk of chunkIds(messageIds)) {
+    const placeholders = sqlInPlaceholders(2, chunk.length);
+    const result = await env.DB.prepare(
+      `UPDATE messages SET is_read = 1
+       WHERE mailbox_id = ?1 AND folder = 'inbox' AND is_read != 1
+         AND id IN (${placeholders})`,
+    )
+      .bind(mailboxId, ...chunk)
+      .run();
+    changes += Number(result.meta.changes ?? 0);
+  }
+  return changes;
+}
+
+export function markMessagesReadLocally(
+  rows: MessageRecord[],
+  messageIds: Iterable<string>,
+): MessageRecord[] {
+  const marked = messageIds instanceof Set ? messageIds : new Set(messageIds);
+  if (marked.size === 0) {
+    return rows;
+  }
+  return rows.map((row) => (marked.has(row.id) ? { ...row, is_read: 1 } : row));
 }
 
 export async function setRead(

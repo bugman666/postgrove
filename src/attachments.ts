@@ -6,6 +6,7 @@ import { formatBytes, missingR2Hint } from "./attachment-limits.ts";
 import { escapeHtml } from "./html.ts";
 import { json, methodNotAllowed, notFoundJson, forbiddenJson } from "./http.ts";
 import type { ParsedAttachment } from "./mime.ts";
+import { chunkIds, sqlInPlaceholders } from "./sql-in.ts";
 
 export {
   attachmentLimits,
@@ -270,14 +271,27 @@ export async function listMessageAttachments(
   mailboxId: string,
   messageId: string,
 ): Promise<AttachmentRecord[]> {
-  const rows = await env.DB.prepare(
-    `SELECT ${ATTACHMENT_COLUMNS} FROM attachments
-     WHERE mailbox_id = ?1 AND message_id = ?2
-     ORDER BY created_at ASC, filename ASC`,
-  )
-    .bind(mailboxId, messageId)
-    .all<AttachmentRecord>();
-  return rows.results ?? [];
+  return listAttachmentsForMessages(env, mailboxId, [messageId]);
+}
+
+export async function listAttachmentsForMessages(
+  env: Env,
+  mailboxId: string,
+  messageIds: readonly string[],
+): Promise<AttachmentRecord[]> {
+  const collected: AttachmentRecord[] = [];
+  for (const chunk of chunkIds(messageIds)) {
+    const placeholders = sqlInPlaceholders(2, chunk.length);
+    const rows = await env.DB.prepare(
+      `SELECT ${ATTACHMENT_COLUMNS} FROM attachments
+       WHERE mailbox_id = ?1 AND message_id IN (${placeholders})
+       ORDER BY created_at ASC, filename ASC`,
+    )
+      .bind(mailboxId, ...chunk)
+      .all<AttachmentRecord>();
+    collected.push(...(rows.results ?? []));
+  }
+  return collected;
 }
 
 export async function getAttachmentById(
