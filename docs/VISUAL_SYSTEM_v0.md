@@ -8,6 +8,8 @@
 
 **冷静林间工具感**：少装饰、多留白、信息优先。像一片安静的邮箱树林，不是霓虹 SaaS，也不是默认后台组件皮肤。
 
+**Brand art:** light editorial (paper + forest green). Locked stills live in [`docs/assets/`](assets/); polish later.
+
 ## 2. Design tokens（建议 CSS 变量名）
 
 ### 2.1 颜色 · Light（MVP 必做）
