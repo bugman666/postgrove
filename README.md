@@ -57,7 +57,7 @@ See Issues under milestones `P0-MVP` … `P3-dev-api`. Longer write-ups: [produc
 
 ## Status
 
-P0 inbox on the Worker: list / read / delete against D1, inbound attachments in R2, plus compose/send behind the owner session. Search (LIKE on from / subject / body), unread toggle with a nav count, and star/flag are in. System folders (inbox / sent / drafts / trash / spam) use the existing `messages.folder` column; drafts save and resume on `/compose`. Outbound is pluggable (`stub` / `resend` / `http`). Reply / reply-all / forward prefill compose and send through the same adapters (In-Reply-To / References on reply). The inbox list groups related mail into basic threads (count on the row; open expands in time order). Outbound send attachments are a later follow-up. Light-editorial brand art (paper + forest green) lives in [`docs/assets/`](docs/assets/).
+P0 inbox on the Worker: list / read / delete against D1, inbound attachments in R2, plus compose/send behind the owner session. Search (LIKE on from / subject / body), unread toggle with a nav count, and star/flag are in. System folders (inbox / sent / drafts / trash / spam) use the existing `messages.folder` column; drafts save and resume on `/compose`. Outbound is pluggable (`stub` / `resend` / `http`). Reply / reply-all / forward prefill compose and send through the same adapters (In-Reply-To / References on reply). The inbox list groups related mail into basic threads (count on the row; open expands in time order). Mailbox-scoped REST tokens live under `/api/v1` (hash at rest, `Authorization: Bearer pg_…`). Public signup is **off** unless Turnstile is configured. Outbound send attachments are a later follow-up. Light-editorial brand art (paper + forest green) lives in [`docs/assets/`](docs/assets/).
 
 ## Local development
 
@@ -65,8 +65,8 @@ Requires Node.js 18.17+ (20+ recommended). No Cloudflare account is needed for t
 
 ```bash
 npm install
-npm run check                    # tsc --noEmit; same command as CI
-cp .dev.vars.example .dev.vars   # local SESSION_SECRET, OWNER_TOKEN, ADMIN_TOKEN, OUTBOUND_PROVIDER=stub, attachment caps
+npm run check                    # tsc --noEmit; CI also runs npm test
+cp .dev.vars.example .dev.vars   # local SESSION_SECRET, OWNER_TOKEN, ADMIN_TOKEN, OUTBOUND_PROVIDER=stub, attachment caps, optional Turnstile
 npm run db:migrate:local
 npm run seed:local               # sample mailboxes + messages + one R2 attachment (local only)
 npm run dev
@@ -320,6 +320,78 @@ curl -sS -H 'Authorization: Bearer change-me-local-admin-token' \
 
 Expect `"role": "admin"`. A missing or wrong bearer returns **401**. Admin is a bearer token, not a cookie, so browser CSRF does not apply the same way. It also does not expire — treat a leaked `ADMIN_TOKEN` as “rotate now”.
 
+### Open REST API (`/api/v1`) + abuse controls
+
+Token API for automating address and mail ops. Cookie owner `/api/*` (inbox UI JSON) is unchanged and still uses `requireOwner`.
+
+**Tokens are mailbox-scoped.** They bind to `mailbox_id` (today's owner/mailbox model). There is no users table here — multi-user / RBAC is a separate change. A token hashed at rest (`SHA-256`) looks like `pg_…`. Only the hash is stored. The plaintext secret is shown **once** at mint time.
+
+Mint (owner session, bound to the logged-in mailbox):
+
+```bash
+curl -sS -b /tmp/pg-cookies -X POST http://127.0.0.1:8787/api/tokens \
+  -H 'content-type: application/json' \
+  -d '{"label":"local-ci"}'
+```
+
+Or admin (any mailbox):
+
+```bash
+curl -sS -X POST http://127.0.0.1:8787/admin/tokens \
+  -H 'Authorization: Bearer change-me-local-admin-token' \
+  -H 'content-type: application/json' \
+  -d '{"mailbox_id":"11111111-1111-4111-8111-111111111111","label":"local-ci"}'
+```
+
+Expect `201` and `token.token` (`pg_…`). Store it; `GET /api/tokens` / `GET /admin/tokens?mailbox_id=…` only show `prefix` + label. Revoke with `POST /api/tokens/:id/revoke` (owner) or `POST /admin/tokens/:id/revoke` (admin).
+
+```bash
+export PG_TOKEN='pg_…'   # paste the minted secret
+
+curl -sS -H "Authorization: Bearer $PG_TOKEN" http://127.0.0.1:8787/api/v1/mailboxes
+curl -sS -H "Authorization: Bearer $PG_TOKEN" \
+  -X POST http://127.0.0.1:8787/api/v1/mailboxes \
+  -H 'content-type: application/json' \
+  -d '{"address":"support@example.test","display_name":"Support"}'
+curl -sS -H "Authorization: Bearer $PG_TOKEN" \
+  http://127.0.0.1:8787/api/v1/mailboxes/11111111-1111-4111-8111-111111111111/messages
+curl -sS -H "Authorization: Bearer $PG_TOKEN" \
+  http://127.0.0.1:8787/api/v1/messages/22222222-2222-4222-8222-222222222223
+curl -sS -H "Authorization: Bearer $PG_TOKEN" \
+  -X POST http://127.0.0.1:8787/api/v1/send \
+  -H 'content-type: application/json' \
+  -d '{"to":"neighbor@example.test","subject":"hello","text":"from token REST"}'
+```
+
+Missing or invalid bearer → **401**. Using a token on another mailbox's messages or send → **403**. `GET /api/v1` is a public catalog (no secrets). Apply `npm run db:migrate:local` so `api_tokens` exists (`0008_api_tokens.sql`).
+
+Owner session can also `POST /api/mailboxes` `{ "address" }` to create an address (still one shared `OWNER_TOKEN` to log in as it). Admin: `POST /admin/mailboxes`.
+
+**Public signup (Turnstile, off by default).** `POST /api/v1/public/signup` is **403** `public_signup_disabled` unless `TURNSTILE_SECRET_KEY` is set. When it is set, a Cloudflare Turnstile widget (site key `TURNSTILE_SITE_KEY`) must succeed: the Worker POSTs `secret` + `response` (+ optional `remoteip`) to `https://challenges.cloudflare.com/turnstile/v0/siteverify`. Missing or failed challenge → **403**. Success creates the mailbox and returns a one-time `pg_…` token.
+
+```bash
+# default (no TURNSTILE_SECRET_KEY): rejected
+curl -sS -o /dev/stderr -w '%{http_code}\n' \
+  -X POST http://127.0.0.1:8787/api/v1/public/signup \
+  -H 'content-type: application/json' \
+  -d '{"address":"guest@example.test","turnstile_token":"xx"}'
+```
+
+**Rate and size limits** (documented defaults; in-memory per Worker isolate, same style as login):
+
+| Surface | Default | Over limit |
+|---------|---------|------------|
+| `POST /auth/login` | 8 / 10 min / IP | **429** + `Retry-After` |
+| `/api/v1/*` (after auth) | **60 / 60s** per token (or admin IP) | **429** + `Retry-After` |
+| `POST /api/v1/public/signup` | **5 / 10 min / IP** | **429** + `Retry-After` |
+| JSON body (`REST_BODY_MAX_BYTES`) | **256000** bytes | **413** `payload_too_large` |
+| Outbound `text` / `subject` | 256000 chars / 998 chars (`src/outbound.ts`) | **400** |
+| Inbound attachments | 10 MiB / 10 files | inbound reject (see above) |
+
+Override REST knobs with `REST_RATE_LIMIT_MAX`, `REST_RATE_LIMIT_WINDOW_MS`, `SIGNUP_RATE_LIMIT_MAX`, `SIGNUP_RATE_LIMIT_WINDOW_MS`, `REST_BODY_MAX_BYTES` in `.dev.vars` / Worker vars. A new isolate starts a fresh window.
+
+P3 wait-for-code / long-poll is out of scope.
+
 ### Inbound stub (local Email Routing)
 
 With `wrangler dev` running, post an RFC 5322 message to Wrangler's local email endpoint. The body must include a `Message-ID` header:
@@ -360,6 +432,9 @@ npx wrangler r2 bucket create postgrove-attachments
 npx wrangler secret put SESSION_SECRET
 npx wrangler secret put OWNER_TOKEN
 npx wrangler secret put ADMIN_TOKEN
+# optional public signup (off until both are set):
+# npx wrangler secret put TURNSTILE_SECRET_KEY
+# npx wrangler secret put TURNSTILE_SITE_KEY
 # when sending for real:
 # npx wrangler secret put RESEND_API_KEY
 # set OUTBOUND_PROVIDER=resend as a Worker var (or http + OUTBOUND_HTTP_URL)
@@ -374,6 +449,10 @@ Then, in the Cloudflare dashboard, enable Email Routing for your domain and add 
 |------|------|
 | `src/index.ts` | Worker `fetch` + `email` handlers |
 | `src/auth.ts` | Owner session + admin bearer; `requireOwner` / `requireAdmin` |
+| `src/rest.ts` | Token REST `/api/v1` + public signup + admin mint |
+| `src/api-tokens.ts` | Opaque `pg_…` tokens (hash at rest, mailbox-scoped) |
+| `src/turnstile.ts` | Cloudflare siteverify (public signup only when configured) |
+| `src/rate-limit.ts` | In-memory limiter for token API + signup |
 | `src/health.ts` | `GET /healthz` |
 | `src/inbound.ts` | Email Routing stub persist + attachment limits |
 | `src/attachment-limits.ts` | Size / count caps and human-readable over-limit errors |
@@ -392,10 +471,12 @@ Then, in the Cloudflare dashboard, enable Email Routing for your domain and add 
 | `migrations/0004_attachments.sql` | D1 `attachments` metadata (bytes in R2) |
 | `migrations/0005_reply_headers.sql` | Inbound To/Cc/Reply-To/References + outbound attempt headers |
 | `migrations/0006_message_star.sql` | `messages.is_starred` + unread / star indexes |
+| `migrations/0007_mailbox_folders.sql` | Folder / draft indexes (P1) |
+| `migrations/0008_api_tokens.sql` | Mailbox-scoped API tokens (hash at rest) |
 | `scripts/seed-local.sql` | Local sample mailboxes + messages (not for remote) |
 | `scripts/seed-grove-note.txt` | Local sample attachment bytes |
 | `wrangler.jsonc` | Worker + D1 + R2 bindings (placeholders) |
-| `.dev.vars.example` | Local secret / outbound / attachment-cap template |
+| `.dev.vars.example` | Local secret / outbound / attachment-cap / Turnstile / REST limit template |
 
 ## License
 
@@ -403,7 +484,7 @@ MIT. See `LICENSE`.
 
 ## CI
 
-GitHub Actions runs `npm run check` (`tsc --noEmit`) on pull requests and `main`. No repository secrets are required.
+GitHub Actions runs `npm run check` (`tsc --noEmit`) and `npm test` on pull requests and `main`. No repository secrets are required.
 
 ## Contributing
 

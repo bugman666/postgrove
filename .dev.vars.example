@@ -56,3 +56,20 @@ OUTBOUND_PROVIDER=stub
 # with a human-readable reason. Outbound compose attachments are a later follow-up.
 ATTACHMENT_MAX_BYTES=10485760
 ATTACHMENT_MAX_COUNT=10
+
+# Open REST (/api/v1). Mint mailbox-scoped tokens with an owner session
+# (POST /api/tokens) or admin (POST /admin/tokens). Authorization: Bearer pg_…
+# Tokens are hashed at rest. The plaintext secret is shown once.
+#
+# Public signup (POST /api/v1/public/signup) stays disabled until both
+# Turnstile keys are set. The Worker POSTs secret + response to
+# https://challenges.cloudflare.com/turnstile/v0/siteverify.
+# TURNSTILE_SITE_KEY=your-turnstile-site-key
+# TURNSTILE_SECRET_KEY=your-turnstile-secret-key
+#
+# Defaults (in-memory, per isolate). Over limit → 429 / 413.
+# REST_RATE_LIMIT_MAX=60
+# REST_RATE_LIMIT_WINDOW_MS=60000
+# SIGNUP_RATE_LIMIT_MAX=5
+# SIGNUP_RATE_LIMIT_WINDOW_MS=600000
+# REST_BODY_MAX_BYTES=256000

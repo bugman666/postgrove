@@ -506,7 +506,7 @@ function adminToken(
   return { ok: true, token };
 }
 
-function bearerToken(header: string | null): string | null {
+export function bearerToken(header: string | null): string | null {
   if (!header) {
     return null;
   }

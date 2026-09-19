@@ -48,14 +48,32 @@ export function notFoundJson(): Response {
   return json({ ok: false, error: "not_found", hint: "Unknown mailbox or message." }, 404);
 }
 
-export function forbiddenJson(): Response {
+export function forbiddenJson(hint?: string): Response {
   return json(
     {
       ok: false,
       error: "forbidden",
-      hint: "This session is bound to another mailbox. POST /auth/login with that address.",
+      hint:
+        hint ??
+        "This session is bound to another mailbox. POST /auth/login with that address.",
     },
     403,
+  );
+}
+
+export function unauthorizedJson(hint = "Send Authorization: Bearer <API token> (pg_…)."): Response {
+  return json({ ok: false, error: "unauthorized", hint }, 401);
+}
+
+export function payloadTooLargeJson(maxBytes: number): Response {
+  return json(
+    {
+      ok: false,
+      error: "payload_too_large",
+      hint: `JSON body is too large (limit ${maxBytes} bytes). Shrink the payload and retry. See README rate / size limits.`,
+      max_bytes: maxBytes,
+    },
+    413,
   );
 }
 

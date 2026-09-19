@@ -1,5 +1,6 @@
 import type { Env } from "./env";
 import { requireOwner, type OwnerPrincipal } from "./auth";
+import { handleOwnerTokenRoutes } from "./rest.ts";
 import {
   isSystemFolder,
   parseDraftFields,
@@ -16,6 +17,7 @@ import {
   getMailboxMessage,
   getMessageById,
   insertDraft,
+  insertMailbox,
   listFolderMessages,
   listInboxMessages,
   listOutboundAttempts,
@@ -53,6 +55,15 @@ export async function handleApi(
   const method = request.method;
   const owner = gate.principal;
 
+  const tokens = await handleOwnerTokenRoutes(request, env, url, owner);
+  if (tokens) {
+    return tokens;
+  }
+
+  if (path === "/api/mailboxes" && method === "POST") {
+    return createOwnedMailbox(request, env);
+  }
+
   if (path === "/api/send") {
     if (method !== "POST") {
       return methodNotAllowed("POST");
@@ -78,7 +89,7 @@ export async function handleApi(
 
   if (path === "/api/mailboxes") {
     if (method !== "GET") {
-      return methodNotAllowed("GET");
+      return methodNotAllowed("GET, POST");
     }
     const mailbox = await getMailbox(env, owner.mailboxId);
     if (!mailbox) {
@@ -664,6 +675,35 @@ async function deleteMessage(
     return notFoundJson();
   }
   return json({ ok: true, id: existing.id, folder: "trash" });
+}
+
+async function createOwnedMailbox(request: Request, env: Env): Promise<Response> {
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return json(
+      { ok: false, error: "invalid_request", hint: 'Send JSON { "address" } (optional display_name).' },
+      400,
+    );
+  }
+  if (!body || typeof body !== "object") {
+    return json(
+      { ok: false, error: "invalid_request", hint: 'Send JSON { "address" } (optional display_name).' },
+      400,
+    );
+  }
+  const record = body as Record<string, unknown>;
+  const address = typeof record.address === "string" ? record.address : "";
+  const displayName = typeof record.display_name === "string" ? record.display_name : null;
+  const created = await insertMailbox(env, { address, displayName });
+  if (!created.ok) {
+    return json(
+      { ok: false, error: created.error, hint: created.hint },
+      created.error === "address_taken" ? 409 : 400,
+    );
+  }
+  return json({ ok: true, mailbox: publicMailbox(created.mailbox) }, 201);
 }
 
 function sameMailbox(owner: OwnerPrincipal, mailbox: MailboxRecord): boolean {

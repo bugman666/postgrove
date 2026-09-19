@@ -24,6 +24,20 @@ export interface Env {
   ATTACHMENT_MAX_BYTES?: string;
   /** Max attachments stored per inbound message (default 10). */
   ATTACHMENT_MAX_COUNT?: string;
+  /** Cloudflare Turnstile secret. When set, POST /api/v1/public/signup is open (challenge required). */
+  TURNSTILE_SECRET_KEY?: string;
+  /** Cloudflare Turnstile site key for a public widget (optional; documented for operators). */
+  TURNSTILE_SITE_KEY?: string;
+  /** Max JSON body size for /api/v1 and public signup (default 256000). */
+  REST_BODY_MAX_BYTES?: string;
+  /** Token API requests per window (default 60). */
+  REST_RATE_LIMIT_MAX?: string;
+  /** Token API window in ms (default 60000). */
+  REST_RATE_LIMIT_WINDOW_MS?: string;
+  /** Public signup attempts per window (default 5). */
+  SIGNUP_RATE_LIMIT_MAX?: string;
+  /** Public signup window in ms (default 600000). */
+  SIGNUP_RATE_LIMIT_WINDOW_MS?: string;
 }
 
 /** Envelope fields used by the Email Routing stub. */

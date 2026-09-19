@@ -56,6 +56,73 @@ export async function listMailboxes(env: Env): Promise<MailboxRecord[]> {
   return rows.results ?? [];
 }
 
+export type InsertMailboxResult =
+  | { ok: true; mailbox: MailboxRecord }
+  | { ok: false; error: "invalid_address" | "address_taken"; hint: string };
+
+const ADDRESS_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+export function parseMailboxAddress(raw: string): { address: string; localPart: string; domain: string } | null {
+  const address = raw.trim().toLowerCase();
+  if (!ADDRESS_RE.test(address) || address.length > 254) {
+    return null;
+  }
+  const at = address.lastIndexOf("@");
+  const localPart = address.slice(0, at);
+  const domain = address.slice(at + 1);
+  if (!localPart || localPart.length > 64 || !domain.includes(".")) {
+    return null;
+  }
+  return { address, localPart, domain };
+}
+
+export async function insertMailbox(
+  env: Env,
+  input: { address: string; displayName?: string | null },
+  now = Date.now(),
+): Promise<InsertMailboxResult> {
+  const parsed = parseMailboxAddress(input.address);
+  if (!parsed) {
+    return {
+      ok: false,
+      error: "invalid_address",
+      hint: "address must be a single email like support@example.test.",
+    };
+  }
+  const existing = await getMailbox(env, parsed.address);
+  if (existing) {
+    return {
+      ok: false,
+      error: "address_taken",
+      hint: "That address already exists. Choose another local part.",
+    };
+  }
+  const mailbox: MailboxRecord = {
+    id: crypto.randomUUID(),
+    address: parsed.address,
+    local_part: parsed.localPart,
+    domain: parsed.domain,
+    display_name: input.displayName?.trim() || null,
+    status: "active",
+  };
+  await env.DB.prepare(
+    `INSERT INTO mailboxes (id, address, local_part, domain, display_name, status, created_at, updated_at)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)`,
+  )
+    .bind(
+      mailbox.id,
+      mailbox.address,
+      mailbox.local_part,
+      mailbox.domain,
+      mailbox.display_name,
+      mailbox.status,
+      now,
+      now,
+    )
+    .run();
+  return { ok: true, mailbox };
+}
+
 export async function getMailbox(
   env: Env,
   idOrAddress: string,
