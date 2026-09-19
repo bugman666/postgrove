@@ -6,6 +6,6 @@ These stills are reference art for README/landing and the inbox empty state. Pol
 
 | File | Use |
 |------|-----|
-| `pg-empty-inbox.png` | Inbox empty state |
-| `pg-readme-hero.png` | README / landing hero (preferred) |
-| `pg-readme-hero-alt.png` | Alternate lighter bento hero |
+| `pg-empty-inbox.jpg` | Inbox empty state |
+| `pg-readme-hero.jpg` | README / landing hero (preferred) |
+| `pg-readme-hero-alt.jpg` | Alternate lighter bento hero |

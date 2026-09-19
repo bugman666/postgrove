@@ -1,5 +1,7 @@
 # Postgrove
 
+![Postgrove](docs/assets/pg-readme-hero.jpg)
+
 Personal and small-team **edge mailbox** on Cloudflare Workers.
 
 Open addresses on a domain you own, receive mail at the edge, read it in a web inbox, and keep attachments in R2. Built for self-hosters who do not want to run a full mail server.
