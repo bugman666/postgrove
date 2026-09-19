@@ -5,7 +5,14 @@ import {
   type SystemFolder,
 } from "./folders.ts";
 import { chunkIds, sqlInPlaceholders, uniqueIds } from "./sql-in.ts";
-import type { InboxFilter } from "./triage";
+import {
+  escapeFts5Query,
+  likeContains,
+  SEARCH_ENGINE_FTS5,
+  SEARCH_ENGINE_LIKE,
+  type InboxFilter,
+  type SearchEngine,
+} from "./triage.ts";
 
 export interface MailboxRecord {
   id: string;
@@ -242,7 +249,8 @@ export async function listInboxMessages(
   mailboxId: string,
   query: InboxQuery = {},
 ): Promise<MessageRecord[]> {
-  return queryInboxMessages(env, mailboxId, query, MESSAGE_COLUMNS);
+  const { messages } = await queryInboxMessages(env, mailboxId, query, MESSAGE_COLUMNS);
+  return messages;
 }
 
 /** Inbox rows for list/thread grouping without selecting `body_text`. */
@@ -251,8 +259,17 @@ export async function listInboxMessageHeads(
   mailboxId: string,
   query: InboxQuery = {},
 ): Promise<MessageRecord[]> {
-  const rows = await queryInboxMessages(env, mailboxId, query, MESSAGE_HEAD_COLUMNS);
-  return rows.map((row) => ({ ...row, body_text: row.body_text ?? null }));
+  const { messages } = await queryInboxMessages(env, mailboxId, query, MESSAGE_HEAD_COLUMNS);
+  return messages.map((row) => ({ ...row, body_text: row.body_text ?? null }));
+}
+
+/** Same list as `listInboxMessages`, plus the engine used for `q`. */
+export async function searchInboxMessages(
+  env: Env,
+  mailboxId: string,
+  query: InboxQuery = {},
+): Promise<{ messages: MessageRecord[]; engine: SearchEngine }> {
+  return queryInboxMessages(env, mailboxId, query, MESSAGE_COLUMNS);
 }
 
 async function queryInboxMessages(
@@ -260,7 +277,23 @@ async function queryInboxMessages(
   mailboxId: string,
   query: InboxQuery,
   columns: string,
-): Promise<MessageRecord[]> {
+): Promise<{ messages: MessageRecord[]; engine: SearchEngine }> {
+  const q = (query.q ?? "").trim();
+  if (q && (await messagesFtsAvailable(env))) {
+    const match = escapeFts5Query(q);
+    if (!match) {
+      return { messages: [], engine: SEARCH_ENGINE_FTS5 };
+    }
+    try {
+      const messages = await queryInboxMessagesFts(env, mailboxId, query, columns, match);
+      return { messages, engine: SEARCH_ENGINE_FTS5 };
+    } catch (error) {
+      if (isFtsUnavailableError(error)) {
+        rememberFtsAvailable(env, false);
+      }
+    }
+  }
+
   const { sql, binds } = inboxListWhere(mailboxId, query);
   const rows = await env.DB.prepare(
     `SELECT ${columns} FROM messages
@@ -270,7 +303,71 @@ async function queryInboxMessages(
   )
     .bind(...binds)
     .all<MessageRecord>();
+  return { messages: rows.results ?? [], engine: SEARCH_ENGINE_LIKE };
+}
+
+async function queryInboxMessagesFts(
+  env: Env,
+  mailboxId: string,
+  query: InboxQuery,
+  columns: string,
+  match: string,
+): Promise<MessageRecord[]> {
+  const filter = query.filter ?? "all";
+  const clauses = ["m.mailbox_id = ?1", "m.folder = 'inbox'", "messages_fts MATCH ?2"];
+  const binds: (string | number)[] = [mailboxId, match];
+  if (filter === "unread") {
+    clauses.push("m.is_read = 0");
+  } else if (filter === "starred") {
+    clauses.push("m.is_starred = 1");
+  }
+  const qualified = qualifyColumns(columns, "m");
+  const rows = await env.DB.prepare(
+    `SELECT ${qualified} FROM messages AS m
+     INNER JOIN messages_fts ON messages_fts.message_id = m.id
+     WHERE ${clauses.join(" AND ")}
+     ORDER BY bm25(messages_fts, 4.0, 3.0, 8.0, 1.0) ASC, m.received_at DESC, m.created_at DESC
+     LIMIT 200`,
+  )
+    .bind(...binds)
+    .all<MessageRecord>();
   return rows.results ?? [];
+}
+
+function qualifyColumns(columns: string, alias: string): string {
+  return columns
+    .split(",")
+    .map((part) => `${alias}.${part.replace(/\s+/g, " ").trim()}`)
+    .join(", ");
+}
+
+const ftsAvailableByDb = new WeakMap<object, boolean>();
+
+async function messagesFtsAvailable(env: Env): Promise<boolean> {
+  const cached = ftsAvailableByDb.get(env.DB);
+  if (cached !== undefined) {
+    return cached;
+  }
+  try {
+    const row = await env.DB.prepare(
+      `SELECT 1 AS ok FROM sqlite_master WHERE name = 'messages_fts' LIMIT 1`,
+    ).first<{ ok: number }>();
+    const ok = row != null;
+    ftsAvailableByDb.set(env.DB, ok);
+    return ok;
+  } catch {
+    ftsAvailableByDb.set(env.DB, false);
+    return false;
+  }
+}
+
+function rememberFtsAvailable(env: Env, ok: boolean): void {
+  ftsAvailableByDb.set(env.DB, ok);
+}
+
+function isFtsUnavailableError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /no such (table|module)|fts5/i.test(message);
 }
 
 function inboxListWhere(
@@ -289,7 +386,7 @@ function inboxListWhere(
   }
 
   if (q) {
-    const pattern = likeContainsPattern(q);
+    const pattern = likeContains(q);
     const fromIdx = binds.length + 1;
     const subjectIdx = binds.length + 2;
     const bodyIdx = binds.length + 3;
@@ -323,10 +420,6 @@ export async function getMailboxMessagesByIds(
   return uniqueIds(messageIds)
     .map((id) => byId.get(id))
     .filter((row): row is MessageRecord => Boolean(row));
-}
-
-function likeContainsPattern(value: string): string {
-  return `%${value.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_")}%`;
 }
 
 export async function countUnreadInbox(env: Env, mailboxId: string): Promise<number> {
