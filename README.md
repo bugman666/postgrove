@@ -56,7 +56,7 @@ See Issues under milestones `P0-MVP` … `P3-dev-api`. Longer write-ups: [produc
 
 ## Status
 
-P0 inbox on the Worker: list / read / delete against D1, inbound attachments in R2, plus compose/send behind the owner session. Outbound is pluggable (`stub` / `resend` / `http`). Reply is a visible entry only (no send). Outbound send attachments are a later follow-up.
+P0 inbox on the Worker: list / read / delete against D1, inbound attachments in R2, plus compose/send behind the owner session. Outbound is pluggable (`stub` / `resend` / `http`). Reply is a visible entry only (no send). Outbound send attachments are a later follow-up. Light-editorial brand art (paper + forest green) lives in [`docs/assets/`](docs/assets/).
 
 ## Local development
 
