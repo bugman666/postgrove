@@ -2,7 +2,7 @@
 
 Personal and small-team **edge mailbox** on Cloudflare Workers.
 
-Open addresses on a domain you own, receive mail at the edge, read it in a later web inbox, and keep attachments in R2. Built for self-hosters who do not want to run a full mail server.
+Open addresses on a domain you own, receive mail at the edge, read it in a web inbox, and keep attachments in R2. Built for self-hosters who do not want to run a full mail server.
 
 > Not affiliated with other Cloudflare mail demos. Educational / self-host use. You are responsible for domain, deliverability, and abuse controls.
 
@@ -25,7 +25,9 @@ Open addresses on a domain you own, receive mail at the edge, read it in a later
 
 - Throwaway / anonymous mailboxes
 - Calendar, contacts, or replacing a full IMAP/SMTP stack
-- Inbox chrome and visual tokens (separate issue; this repo’s Worker has no UI yet)
+- Real reply / reply-all / forward (the inbox shows a reply entry only)
+- Compose + outbound provider
+- Multi-user / RBAC (owner session is in; hardening is a later track)
 
 ## Stack (intended)
 
@@ -53,7 +55,7 @@ See Issues under milestones `P0-MVP` … `P3-dev-api`. Longer write-ups: [produc
 
 ## Status
 
-Worker scaffold: health endpoint, D1 schema, Email Routing stub, and simple owner/admin auth. No inbox UI in this step.
+P0 inbox on the Worker: list / read / delete against D1, plus a small web UI behind the owner session. Reply and compose are visible stubs only (no send).
 
 ## Local development
 
@@ -63,11 +65,40 @@ Requires Node.js 18.17+ (20+ recommended). No Cloudflare account is needed for t
 npm install
 cp .dev.vars.example .dev.vars   # local SESSION_SECRET, OWNER_TOKEN, ADMIN_TOKEN
 npm run db:migrate:local
-npm run db:seed:local            # sample mailbox inbox@example.test
+npm run db:seed:local            # sample mailboxes + messages (local only)
 npm run dev
 ```
 
 `wrangler dev` serves the Worker at `http://127.0.0.1:8787` by default.
+
+### Inbox (local)
+
+Inbox HTML and `/api/mailboxes` / `/api/messages` require an owner session. `/healthz` and inbound Email Routing stay public. Log in first (see Auth below), then open [http://127.0.0.1:8787/](http://127.0.0.1:8787/). The session is bound to the address you signed in as.
+
+Seeded addresses:
+
+| Address | What you should see after login |
+|---------|---------------------|
+| `inbox@example.test` | Three sample messages (unread / sender / subject / time) |
+| `empty@example.test` | Empty-inbox copy |
+
+Direct links (same origin as `wrangler dev`):
+
+- Inbox with mail: [http://127.0.0.1:8787/box/11111111-1111-4111-8111-111111111111](http://127.0.0.1:8787/box/11111111-1111-4111-8111-111111111111)
+- Empty box: [http://127.0.0.1:8787/box/11111111-1111-4111-8111-111111111112](http://127.0.0.1:8787/box/11111111-1111-4111-8111-111111111112)
+
+Open a row to read the body. An unread row becomes read. Delete moves the row to `trash` (it leaves the inbox list; there is no trash folder UI yet). The **回复** control only shows a placeholder — it does not send mail.
+
+JSON against the same seeded rows (cookie from `POST /auth/login`):
+
+```bash
+curl -sS -b /tmp/pg-cookies http://127.0.0.1:8787/api/mailboxes
+curl -sS -b /tmp/pg-cookies http://127.0.0.1:8787/api/mailboxes/11111111-1111-4111-8111-111111111111/messages
+curl -sS -b /tmp/pg-cookies http://127.0.0.1:8787/api/messages/22222222-2222-4222-8222-222222222223
+curl -sS -b /tmp/pg-cookies -X DELETE http://127.0.0.1:8787/api/messages/22222222-2222-4222-8222-222222222221
+```
+
+Re-seed with `npm run db:seed:local` if you want the sample rows back (`INSERT OR IGNORE` will not restore a row you already deleted). To reset the local D1 file, stop Wrangler, remove `.wrangler/state`, then migrate + seed again.
 
 ### Health
 
@@ -143,7 +174,7 @@ Create the address first, then receive. The stub rejects unknown and disabled re
 
 ```bash
 npx wrangler d1 execute postgrove --local --command \
-  "SELECT address FROM mailboxes; SELECT subject, envelope_from, snippet FROM messages;"
+  "SELECT address FROM mailboxes; SELECT subject, envelope_from, folder, is_read FROM messages;"
 ```
 
 ## Remote placeholders
@@ -171,8 +202,11 @@ Then, in the Cloudflare dashboard, enable Email Routing for your domain and add 
 | `src/auth.ts` | Owner session + admin bearer; `requireOwner` / `requireAdmin` |
 | `src/health.ts` | `GET /healthz` |
 | `src/inbound.ts` | Email Routing stub persist |
+| `src/api.ts` | JSON list / read / delete |
+| `src/ui.ts` | Inbox HTML (list / read / stubs) |
 | `migrations/0001_init.sql` | D1 `mailboxes` + `messages` |
-| `scripts/seed-local.sql` | Local sample mailbox (not for remote) |
+| `migrations/0002_message_body.sql` | `messages.body_text` |
+| `scripts/seed-local.sql` | Local sample mailboxes + messages (not for remote) |
 | `wrangler.jsonc` | Worker + D1 bindings (placeholders) |
 | `.dev.vars.example` | Local secret template |
 

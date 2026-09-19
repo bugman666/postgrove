@@ -1,6 +1,5 @@
 import type { Env, InboundEmail } from "./env";
-
-const SNIPPET_MAX = 240;
+import { extractBodies } from "./mime";
 
 export async function handleInbound(message: InboundEmail, env: Env): Promise<void> {
   let parsedTo: AddressParts;
@@ -31,7 +30,8 @@ export async function handleInbound(message: InboundEmail, env: Env): Promise<vo
   const now = Date.now();
   const subject = header(message.headers, "subject");
   const rfcMessageId = header(message.headers, "message-id");
-  const snippet = await snippetFromRaw(message.raw);
+  const rawText = await new Response(message.raw).text();
+  const { snippet, bodyText } = extractBodies(rawText);
   const mailboxId = mailbox.id;
 
   const messageId = crypto.randomUUID();
@@ -39,8 +39,8 @@ export async function handleInbound(message: InboundEmail, env: Env): Promise<vo
     await env.DB.prepare(
       `INSERT INTO messages (
          id, mailbox_id, rfc_message_id, envelope_from, envelope_to,
-         subject, snippet, size_bytes, is_read, folder, received_at, created_at
-       ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, 'inbox', ?9, ?9)`,
+         subject, snippet, body_text, size_bytes, is_read, folder, received_at, created_at
+       ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, 'inbox', ?10, ?10)`,
     )
       .bind(
         messageId,
@@ -50,6 +50,7 @@ export async function handleInbound(message: InboundEmail, env: Env): Promise<vo
         parsedTo.address,
         subject,
         snippet,
+        bodyText,
         message.rawSize,
         now,
       )
@@ -104,19 +105,3 @@ function header(headers: Headers, name: string): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
-async function snippetFromRaw(raw: ReadableStream<Uint8Array>): Promise<string | null> {
-  const text = await new Response(raw).text();
-  const crlf = text.indexOf("\r\n\r\n");
-  const lf = text.indexOf("\n\n");
-  let start = 0;
-  if (crlf >= 0) {
-    start = crlf + 4;
-  } else if (lf >= 0) {
-    start = lf + 2;
-  }
-  const body = text.slice(start).replace(/\s+/g, " ").trim();
-  if (!body) {
-    return null;
-  }
-  return body.length > SNIPPET_MAX ? body.slice(0, SNIPPET_MAX) : body;
-}
