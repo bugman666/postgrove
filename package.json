@@ -6,6 +6,7 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "check": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test test/auth.test.ts",
     "db:migrate:local": "wrangler d1 migrations apply postgrove --local",
     "db:seed:local": "wrangler d1 execute postgrove --local --file=scripts/seed-local.sql",
     "db:migrate:remote": "wrangler d1 migrations apply postgrove --remote"

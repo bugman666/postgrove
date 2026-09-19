@@ -1,5 +1,26 @@
 # Copy to `.dev.vars` for local Wrangler secrets.
 # `.dev.vars` is gitignored. Do not commit real credentials.
+#
+# Local login (after `cp .dev.vars.example .dev.vars` and `npm run dev`):
+#   curl -c /tmp/pg-cookies -X POST http://127.0.0.1:8787/auth/login \
+#     -H 'content-type: application/json' \
+#     -d '{"address":"inbox@example.test","token":"change-me-local-owner-token"}'
+#   curl -b /tmp/pg-cookies http://127.0.0.1:8787/auth/session
+#   curl -H 'Authorization: Bearer change-me-local-admin-token' \
+#     http://127.0.0.1:8787/admin/ping
+#
+# Production: `npx wrangler secret put SESSION_SECRET` (and OWNER_TOKEN, ADMIN_TOKEN).
+# Do not reuse these placeholders remotely.
+
+# HMAC secret for the owner session cookie (min 16 characters). Rotate to revoke sessions.
+SESSION_SECRET=change-me-local-session-secret
+
+# Shared mailbox-owner token for POST /auth/login (min 8 characters).
+# Any active mailbox address plus this token issues a session for that address.
+OWNER_TOKEN=change-me-local-owner-token
+
+# Admin bearer token for /admin/* (Authorization: Bearer …, min 8 characters).
+ADMIN_TOKEN=change-me-local-admin-token
 
 # Reserved for a later outbound send provider. Unused in this scaffold.
 # SEND_PROVIDER_KEY=
