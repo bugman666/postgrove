@@ -53,7 +53,7 @@ See Issues under milestones `P0-MVP` … `P3-dev-api`. Longer write-ups: [produc
 
 ## Status
 
-Worker scaffold only: health endpoint, D1 schema, Email Routing stub. No inbox UI in this step.
+Worker scaffold: health endpoint, D1 schema, Email Routing stub, and simple owner/admin auth. No inbox UI in this step.
 
 ## Local development
 
@@ -61,7 +61,7 @@ Requires Node.js 18.17+ (20+ recommended). No Cloudflare account is needed for t
 
 ```bash
 npm install
-cp .dev.vars.example .dev.vars   # optional; no secrets required for this scaffold
+cp .dev.vars.example .dev.vars   # local SESSION_SECRET, OWNER_TOKEN, ADMIN_TOKEN
 npm run db:migrate:local
 npm run db:seed:local            # sample mailbox inbox@example.test
 npm run dev
@@ -76,6 +76,49 @@ curl -sS http://127.0.0.1:8787/healthz
 ```
 
 Expect JSON with `"ok": true` and `"db": "ready"` after migrations. A `503` with `"migrations_pending"` means the local D1 schema has not been applied.
+
+`GET /healthz` stays public (no session). The Email Routing handler is also unauthenticated — Cloudflare calls it, not a browser.
+
+### Auth (mailbox owner session + admin bearer)
+
+Design: **owner = signed HttpOnly session cookie** after `POST /auth/login`. **Admin = `Authorization: Bearer <ADMIN_TOKEN>`**. One shared `OWNER_TOKEN` proves mailbox ownership; the session is bound to the address you logged in as. Inbox code should call `requireOwner` / `requireAdmin` from `src/auth.ts`.
+
+Copy `.dev.vars.example` to `.dev.vars` (gitignored). The example values work locally; change them before any remote deploy and set the same names with `npx wrangler secret put`.
+
+Owner login (needs the seeded address and `OWNER_TOKEN`):
+
+```bash
+curl -i -c /tmp/pg-cookies -X POST http://127.0.0.1:8787/auth/login \
+  -H 'content-type: application/json' \
+  -d '{"address":"inbox@example.test","token":"change-me-local-owner-token"}'
+```
+
+Expect `200` and a `set-cookie: postgrove_session=...` header. Then:
+
+```bash
+curl -sS -b /tmp/pg-cookies http://127.0.0.1:8787/auth/session
+```
+
+Expect JSON with `"ok": true` and `"role": "owner"`. Without a cookie, the same URL returns **401**:
+
+```bash
+curl -sS -o /dev/stderr -w '%{http_code}\n' http://127.0.0.1:8787/auth/session
+```
+
+Sign out (clears the cookie on the client; sessions are stateless HMAC tokens):
+
+```bash
+curl -i -c /tmp/pg-cookies -X POST http://127.0.0.1:8787/auth/logout
+```
+
+Admin stub (later mailbox-management routes can reuse `requireAdmin`):
+
+```bash
+curl -sS -H 'Authorization: Bearer change-me-local-admin-token' \
+  http://127.0.0.1:8787/admin/ping
+```
+
+Expect `"role": "admin"`. A missing or wrong bearer returns **401**.
 
 ### Inbound stub (local Email Routing)
 
@@ -112,6 +155,9 @@ npx wrangler login
 npx wrangler d1 create postgrove
 # paste the printed database_id into wrangler.jsonc
 npm run db:migrate:remote
+npx wrangler secret put SESSION_SECRET
+npx wrangler secret put OWNER_TOKEN
+npx wrangler secret put ADMIN_TOKEN
 npx wrangler deploy
 ```
 
@@ -122,6 +168,7 @@ Then, in the Cloudflare dashboard, enable Email Routing for your domain and add 
 | Path | Role |
 |------|------|
 | `src/index.ts` | Worker `fetch` + `email` handlers |
+| `src/auth.ts` | Owner session + admin bearer; `requireOwner` / `requireAdmin` |
 | `src/health.ts` | `GET /healthz` |
 | `src/inbound.ts` | Email Routing stub persist |
 | `migrations/0001_init.sql` | D1 `mailboxes` + `messages` |
