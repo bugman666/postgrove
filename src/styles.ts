@@ -401,6 +401,7 @@ textarea:focus-visible {
   font-size: var(--pg-text-sm);
   color: var(--pg-color-text);
   min-width: 0;
+  flex: 1 1 auto;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -438,7 +439,8 @@ textarea:focus-visible {
 
 .thread-count {
   display: inline-block;
-  margin-left: 6px;
+  flex: 0 0 auto;
+  margin-left: auto;
   min-width: 18px;
   padding: 0 6px;
   border-radius: 999px;
@@ -448,7 +450,6 @@ textarea:focus-visible {
   font-weight: 650;
   line-height: 18px;
   text-align: center;
-  vertical-align: middle;
 }
 
 .msg.unread .thread-count {

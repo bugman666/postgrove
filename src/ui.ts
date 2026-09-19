@@ -971,7 +971,8 @@ function threadRow(
     </form>
     <a class="msg${unreadClass}${selected}" href="${escapeHtml(href)}">
       <div class="msg-top">
-        <span class="from">${dot}${escapeHtml(latest.envelope_from)}${countBadge}</span>
+        <span class="from">${dot}${escapeHtml(latest.envelope_from)}</span>
+        ${countBadge}
         <time class="time" datetime="${escapeHtml(new Date(latest.received_at).toISOString())}">${escapeHtml(formatReceived(latest.received_at))}</time>
       </div>
       <div class="subject">${escapeHtml(subject)}</div>
