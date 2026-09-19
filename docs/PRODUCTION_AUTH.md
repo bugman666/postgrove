@@ -44,7 +44,7 @@ Sessions are **stateless HMAC** cookies (`postgrove_session` / `postgrove_admin`
 
 Minimum lengths: `SESSION_SECRET` 16 characters; `OWNER_TOKEN` / `ADMIN_TOKEN` 8. Use long random values in production (`openssl rand -hex 32`).
 
-Login / REST / signup counters are **per isolate**. A new isolate starts a fresh window. That is accepted for a single-operator box. A shared store is #51, not this runbook.
+Login / REST / signup counters share a window when the `RATE_LIMIT` KV namespace is bound (`wrangler.jsonc`). Without the binding, counters stay **per isolate** (local / tests). See [docs/DEPLOY.md](DEPLOY.md).
 
 ## Outbound HTTP URL — operator-trusted env only
 
