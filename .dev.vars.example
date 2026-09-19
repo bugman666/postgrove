@@ -50,3 +50,9 @@ OUTBOUND_PROVIDER=stub
 
 # Optional From override for any provider (wins over RESEND_FROM).
 # OUTBOUND_FROM=
+
+# Inbound attachment caps (also set as wrangler.jsonc vars; override here if needed).
+# Defaults: 10 MiB per file, 10 files per message. Over-limit inbound is rejected
+# with a human-readable reason. Outbound compose attachments are a later follow-up.
+ATTACHMENT_MAX_BYTES=10485760
+ATTACHMENT_MAX_COUNT=10

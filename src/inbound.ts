@@ -1,5 +1,7 @@
 import type { Env, InboundEmail } from "./env";
-import { extractBodies } from "./mime";
+import { inboundAttachmentRejection } from "./attachment-limits";
+import { persistInboundAttachments } from "./attachments";
+import { extractAttachments, extractBodies } from "./mime";
 
 export async function handleInbound(message: InboundEmail, env: Env): Promise<void> {
   let parsedTo: AddressParts;
@@ -30,8 +32,22 @@ export async function handleInbound(message: InboundEmail, env: Env): Promise<vo
   const now = Date.now();
   const subject = header(message.headers, "subject");
   const rfcMessageId = header(message.headers, "message-id");
-  const rawText = await new Response(message.raw).text();
+  const rawBytes = new Uint8Array(await new Response(message.raw).arrayBuffer());
+  const rawText = new TextDecoder("utf-8", { fatal: false, ignoreBOM: true }).decode(rawBytes);
   const { snippet, bodyText } = extractBodies(rawText);
+  const files = extractAttachments(rawBytes);
+  const limitError = inboundAttachmentRejection(
+    files.map((file) => ({ filename: file.filename, size: file.bytes.byteLength })),
+    env,
+  );
+  if (limitError) {
+    console.log("inbound stub: attachment rejected", {
+      to: parsedTo.address,
+      error: limitError.error,
+    });
+    message.setReject(limitError.hint);
+    return;
+  }
   const mailboxId = mailbox.id;
 
   const messageId = crypto.randomUUID();
@@ -67,6 +83,15 @@ export async function handleInbound(message: InboundEmail, env: Env): Promise<vo
     throw error;
   }
 
+  if (files.length > 0) {
+    try {
+      await persistInboundAttachments(env, mailboxId, messageId, files, now);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "unknown";
+      console.log("inbound stub: attachment store failed", { messageId, detail });
+    }
+  }
+
   console.log("inbound stub: stored", {
     id: messageId,
     mailboxId,
@@ -74,6 +99,7 @@ export async function handleInbound(message: InboundEmail, env: Env): Promise<vo
     to: parsedTo.address,
     subject,
     sizeBytes: message.rawSize,
+    attachments: files.length,
   });
 }
 

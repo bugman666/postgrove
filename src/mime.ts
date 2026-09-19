@@ -6,6 +6,12 @@ export interface ExtractedBody {
   snippet: string | null;
 }
 
+export interface ParsedAttachment {
+  filename: string;
+  contentType: string;
+  bytes: Uint8Array;
+}
+
 export function extractBodies(rawText: string): ExtractedBody {
   const { headers, body } = splitMime(rawText);
   const contentType = headerValue(headers, "content-type") ?? "text/plain";
@@ -23,6 +29,14 @@ export function extractBodies(rawText: string): ExtractedBody {
   const snippet =
     collapsed.length > SNIPPET_MAX ? collapsed.slice(0, SNIPPET_MAX) : collapsed;
   return { bodyText: text, snippet: snippet || null };
+}
+
+/** Binary-safe MIME walk for inbound attachments (base64 / QP / 8bit). */
+export function extractAttachments(raw: Uint8Array | string): ParsedAttachment[] {
+  const text = typeof raw === "string" ? raw : bytesToLatin1(raw);
+  const { headers, body } = splitMime(text);
+  const contentType = headerValue(headers, "content-type") ?? "text/plain";
+  return collectAttachments(headers, body, contentType);
 }
 
 function splitMime(raw: string): { headers: string; body: string } {
@@ -126,4 +140,194 @@ function stripHtml(html: string): string | null {
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function collectAttachments(
+  headers: string,
+  body: string,
+  contentType: string,
+): ParsedAttachment[] {
+  if (/multipart\//i.test(contentType)) {
+    const boundary = mimeBoundary(contentType);
+    if (!boundary) {
+      return [];
+    }
+    const found: ParsedAttachment[] = [];
+    for (const part of splitMultipartParts(body, boundary)) {
+      const { headers: partHeaders, body: partBody } = splitMime(part);
+      const partType = headerValue(partHeaders, "content-type") ?? "text/plain";
+      found.push(...collectAttachments(partHeaders, partBody, partType));
+    }
+    return found;
+  }
+
+  if (!isAttachmentPart(headers, contentType)) {
+    return [];
+  }
+
+  const disposition = headerValue(headers, "content-disposition");
+  const encoding = headerValue(headers, "content-transfer-encoding") ?? "7bit";
+  const filename = filenameFrom(disposition, contentType);
+  const bytes = decodeTransfer(body, encoding);
+  const media = contentType.split(";")[0]?.trim().toLowerCase() || "application/octet-stream";
+  return [{ filename, contentType: media, bytes }];
+}
+
+function splitMultipartParts(body: string, boundary: string): string[] {
+  const token = `--${boundary}`;
+  const normalized = body.replace(/\r\n/g, "\n");
+  const chunks = normalized.split(token);
+  const parts: string[] = [];
+  for (let i = 0; i < chunks.length; i++) {
+    let chunk = chunks[i];
+    if (i === 0) {
+      continue;
+    }
+    if (chunk.startsWith("--")) {
+      break;
+    }
+    if (chunk.startsWith("\n")) {
+      chunk = chunk.slice(1);
+    }
+    if (chunk.endsWith("\n")) {
+      chunk = chunk.slice(0, -1);
+    }
+    if (chunk.trim().length === 0) {
+      continue;
+    }
+    parts.push(chunk);
+  }
+  return parts;
+}
+
+function isAttachmentPart(headers: string, contentType: string): boolean {
+  const disposition = headerValue(headers, "content-disposition") ?? "";
+  if (/attachment/i.test(disposition)) {
+    return true;
+  }
+  if (mimeParam(disposition, "filename") || mimeParam(disposition, "filename*")) {
+    return true;
+  }
+  if (mimeParam(contentType, "name")) {
+    return true;
+  }
+  const media = contentType.split(";")[0]?.trim().toLowerCase() ?? "";
+  if (!media || media.startsWith("multipart/") || media === "text/plain" || media === "text/html") {
+    return false;
+  }
+  return true;
+}
+
+function filenameFrom(disposition: string | null, contentType: string): string {
+  const raw =
+    mimeParam(disposition, "filename*") ??
+    mimeParam(disposition, "filename") ??
+    mimeParam(contentType, "name") ??
+    "attachment";
+  const cleaned = raw.replace(/[\r\n]+/g, " ").trim();
+  return cleaned.length > 0 ? cleaned.slice(0, 200) : "attachment";
+}
+
+function mimeParam(header: string | null, name: string): string | null {
+  if (!header) {
+    return null;
+  }
+  const starred = new RegExp(`${escapeRegExp(name)}\\*\\s*=\\s*([^;]+)`, "i");
+  const encoded = header.match(starred);
+  if (encoded && name.endsWith("*")) {
+    let value = encoded[1].trim().replace(/^"(.*)"$/, "$1");
+    const parts = value.split("''");
+    const data = parts.length === 2 ? parts[1] : value;
+    try {
+      return decodeURIComponent(data);
+    } catch {
+      return data;
+    }
+  }
+  const simple = new RegExp(`${escapeRegExp(name)}\\s*=\\s*("(?:[^"\\\\]|\\\\.)*"|[^;\\s]+)`, "i");
+  const match = header.match(simple);
+  if (!match) {
+    return null;
+  }
+  let value = match[1].trim();
+  if (value.startsWith('"') && value.endsWith('"')) {
+    value = value.slice(1, -1).replace(/\\"/g, '"');
+  }
+  return decodeMimeWords(value);
+}
+
+function decodeMimeWords(value: string): string {
+  return value.replace(/=\?([^?]+)\?([BbQq])\?([^?]*)\?=/g, (_all, charset, enc, data) => {
+    try {
+      const bytes =
+        String(enc).toUpperCase() === "B"
+          ? base64ToBytes(String(data))
+          : quotedPrintableToBytes(String(data).replace(/_/g, " "));
+      return new TextDecoder(String(charset) || "utf-8", { fatal: false, ignoreBOM: true }).decode(bytes);
+    } catch {
+      return String(data);
+    }
+  });
+}
+
+function decodeTransfer(body: string, encoding: string): Uint8Array {
+  const enc = encoding.split(";")[0]?.trim().toLowerCase() ?? "7bit";
+  if (enc === "base64") {
+    return base64ToBytes(body.replace(/\s+/g, ""));
+  }
+  if (enc === "quoted-printable") {
+    return quotedPrintableToBytes(body);
+  }
+  return latin1ToBytes(body);
+}
+
+function base64ToBytes(value: string): Uint8Array {
+  if (!value) {
+    return new Uint8Array();
+  }
+  try {
+    const bin = atob(value);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) {
+      out[i] = bin.charCodeAt(i);
+    }
+    return out;
+  } catch {
+    return new Uint8Array();
+  }
+}
+
+function quotedPrintableToBytes(value: string): Uint8Array {
+  const unfolded = value.replace(/=\r?\n/g, "");
+  const bytes: number[] = [];
+  for (let i = 0; i < unfolded.length; i++) {
+    const ch = unfolded[i];
+    if (ch === "=" && i + 2 < unfolded.length) {
+      const hex = unfolded.slice(i + 1, i + 3);
+      if (/^[0-9A-Fa-f]{2}$/.test(hex)) {
+        bytes.push(parseInt(hex, 16));
+        i += 2;
+        continue;
+      }
+    }
+    bytes.push(ch.charCodeAt(0) & 0xff);
+  }
+  return new Uint8Array(bytes);
+}
+
+function bytesToLatin1(bytes: Uint8Array): string {
+  let text = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    text += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  return text;
+}
+
+function latin1ToBytes(text: string): Uint8Array {
+  const out = new Uint8Array(text.length);
+  for (let i = 0; i < text.length; i++) {
+    out[i] = text.charCodeAt(i) & 0xff;
+  }
+  return out;
 }

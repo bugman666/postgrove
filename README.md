@@ -56,7 +56,7 @@ See Issues under milestones `P0-MVP` … `P3-dev-api`. Longer write-ups: [produc
 
 ## Status
 
-P0 inbox on the Worker: list / read / delete against D1, plus compose/send behind the owner session. Outbound is pluggable (`stub` / `resend` / `http`). Reply is a visible entry only (no send).
+P0 inbox on the Worker: list / read / delete against D1, inbound attachments in R2, plus compose/send behind the owner session. Outbound is pluggable (`stub` / `resend` / `http`). Reply is a visible entry only (no send). Outbound send attachments are a later follow-up.
 
 ## Local development
 
@@ -65,9 +65,9 @@ Requires Node.js 18.17+ (20+ recommended). No Cloudflare account is needed for t
 ```bash
 npm install
 npm run check                    # tsc --noEmit; same command as CI
-cp .dev.vars.example .dev.vars   # local SESSION_SECRET, OWNER_TOKEN, ADMIN_TOKEN, OUTBOUND_PROVIDER=stub
+cp .dev.vars.example .dev.vars   # local SESSION_SECRET, OWNER_TOKEN, ADMIN_TOKEN, OUTBOUND_PROVIDER=stub, attachment caps
 npm run db:migrate:local
-npm run db:seed:local            # sample mailboxes + messages (local only)
+npm run seed:local               # sample mailboxes + messages + one R2 attachment (local only)
 npm run dev
 ```
 
@@ -83,7 +83,7 @@ Seeded addresses:
 
 | Address | What you should see after login |
 |---------|---------------------|
-| `inbox@example.test` | Three sample messages (unread / sender / subject / time) |
+| `inbox@example.test` | Four sample messages, including one with a downloadable attachment |
 | `empty@example.test` | Empty-inbox copy |
 
 Direct links (same origin as `wrangler dev`):
@@ -91,7 +91,7 @@ Direct links (same origin as `wrangler dev`):
 - Inbox with mail: [http://127.0.0.1:8787/box/11111111-1111-4111-8111-111111111111](http://127.0.0.1:8787/box/11111111-1111-4111-8111-111111111111)
 - Empty box: [http://127.0.0.1:8787/box/11111111-1111-4111-8111-111111111112](http://127.0.0.1:8787/box/11111111-1111-4111-8111-111111111112)
 
-Open a row to read the body. An unread row becomes read. Delete moves the row to `trash` (it leaves the inbox list; there is no trash folder UI yet). The **回复** control only shows a placeholder — it does not send mail. **写信** is a real form (to / subject / body). With `OUTBOUND_PROVIDER=stub` (the example `.dev.vars`) a submit records the attempt in D1 and does not leave the box.
+Open a row to read the body. An unread row becomes read. Delete moves the row to `trash` (it leaves the inbox list; there is no trash folder UI yet). The **回复** control only shows a placeholder — it does not send mail. The seeded 「本地附件种子」row lists `grove-note.txt`; the owner session can download it from `/attachments/33333333-3333-4333-8333-333333333331`. **写信** is a real form (to / subject / body). With `OUTBOUND_PROVIDER=stub` (the example `.dev.vars`) a submit records the attempt in D1 and does not leave the box.
 
 JSON against the same seeded rows (cookie from `POST /auth/login`):
 
@@ -102,7 +102,60 @@ curl -sS -b /tmp/pg-cookies http://127.0.0.1:8787/api/messages/22222222-2222-422
 curl -sS -b /tmp/pg-cookies -X DELETE http://127.0.0.1:8787/api/messages/22222222-2222-4222-8222-222222222221
 ```
 
-Re-seed with `npm run db:seed:local` if you want the sample rows back (`INSERT OR IGNORE` will not restore a row you already deleted). To reset the local D1 file, stop Wrangler, remove `.wrangler/state`, then migrate + seed again.
+Re-seed with `npm run seed:local` if you want the sample rows and the R2 object back (`INSERT OR IGNORE` will not restore a row you already deleted). To reset the local D1 / R2 files, stop Wrangler, remove `.wrangler/state`, then migrate + seed again.
+
+### Attachments (R2 + size limits)
+
+Inbound MIME parts with `Content-Disposition: attachment` (or a filename / non-text body part) are stored in the `ATTACHMENTS` R2 bucket. Metadata lives in D1 (`attachments`). The read view lists them; `GET /attachments/:id` streams the bytes after `requireOwner`.
+
+| Knob | Where | Default | Role |
+|------|--------|---------|------|
+| `ATTACHMENTS` | `wrangler.jsonc` `r2_buckets` | binding required | R2 bucket for bytes |
+| `ATTACHMENT_MAX_BYTES` | wrangler `vars` / `.dev.vars` | `10485760` (10 MiB) | Max size of one inbound attachment |
+| `ATTACHMENT_MAX_COUNT` | wrangler `vars` / `.dev.vars` | `10` | Max attachments stored per inbound message |
+
+Over-limit inbound mail is **rejected** (`message.setReject`) with a human-readable reason that includes the cap, for example: 附件太大（上限 10 MB）… Remove large files or compress and try again. The message is not stored. Missing R2 binding rejects only when the message actually has attachments.
+
+Unauthenticated download is **401** (`unauthorized`, same hint as other owner routes). Another mailbox's session is **403**. There are no public unauthenticated attachment URLs. Virus scanning is out of scope. Compose/send attachments are not in this change.
+
+Local seed object (after `npm run seed:local`):
+
+```bash
+curl -sS -b /tmp/pg-cookies -D- \
+  http://127.0.0.1:8787/attachments/33333333-3333-4333-8333-333333333331 -o /tmp/grove-note.txt
+curl -sS -o /dev/stderr -w '%{http_code}\n' \
+  http://127.0.0.1:8787/attachments/33333333-3333-4333-8333-333333333331
+```
+
+The second call (no cookie) should print `401`.
+
+Inbound with a small attachment (Wrangler local email endpoint):
+
+```bash
+curl --request POST 'http://127.0.0.1:8787/cdn-cgi/local/email' \
+  --url-query 'from=sender@example.com' \
+  --url-query 'to=inbox@example.test' \
+  --data-raw 'From: sender@example.com
+To: inbox@example.test
+Subject: inbound with file
+Date: Sat, 19 Sep 2026 12:00:00 +0000
+Message-ID: <local-attach-1@example.test>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="bnd"
+
+--bnd
+Content-Type: text/plain; charset=utf-8
+
+See the note.
+--bnd
+Content-Type: text/plain; name=note.txt
+Content-Disposition: attachment; filename="note.txt"
+Content-Transfer-Encoding: base64
+
+aGVsbG8K
+--bnd--
+'
+```
 
 ### Health
 
@@ -226,6 +279,8 @@ npx wrangler login
 npx wrangler d1 create postgrove
 # paste the printed database_id into wrangler.jsonc
 npm run db:migrate:remote
+npx wrangler r2 bucket create postgrove-attachments
+# confirm wrangler.jsonc r2_buckets.bucket_name matches
 npx wrangler secret put SESSION_SECRET
 npx wrangler secret put OWNER_TOKEN
 npx wrangler secret put ADMIN_TOKEN
@@ -244,7 +299,10 @@ Then, in the Cloudflare dashboard, enable Email Routing for your domain and add 
 | `src/index.ts` | Worker `fetch` + `email` handlers |
 | `src/auth.ts` | Owner session + admin bearer; `requireOwner` / `requireAdmin` |
 | `src/health.ts` | `GET /healthz` |
-| `src/inbound.ts` | Email Routing stub persist |
+| `src/inbound.ts` | Email Routing stub persist + attachment limits |
+| `src/attachment-limits.ts` | Size / count caps and human-readable over-limit errors |
+| `src/attachments.ts` | R2 store / owner download / read-view links |
+| `src/mime.ts` | Plain-text body extract + inbound MIME attachments |
 | `src/api.ts` | JSON list / read / delete / send |
 | `src/ui.ts` | Inbox HTML + compose form |
 | `src/outbound.ts` | Pluggable outbound adapters (`stub` / `resend` / `http`) |
@@ -252,9 +310,11 @@ Then, in the Cloudflare dashboard, enable Email Routing for your domain and add 
 | `migrations/0001_init.sql` | D1 `mailboxes` + `messages` |
 | `migrations/0002_message_body.sql` | `messages.body_text` |
 | `migrations/0003_outbound_attempts.sql` | D1 `outbound_attempts` |
+| `migrations/0004_attachments.sql` | D1 `attachments` metadata (bytes in R2) |
 | `scripts/seed-local.sql` | Local sample mailboxes + messages (not for remote) |
-| `wrangler.jsonc` | Worker + D1 bindings (placeholders) |
-| `.dev.vars.example` | Local secret template |
+| `scripts/seed-grove-note.txt` | Local sample attachment bytes |
+| `wrangler.jsonc` | Worker + D1 + R2 bindings (placeholders) |
+| `.dev.vars.example` | Local secret / outbound / attachment-cap template |
 
 ## License
 

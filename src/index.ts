@@ -1,5 +1,6 @@
 import type { Env, InboundEmail } from "./env";
 import { handleApi } from "./api";
+import { ATTACHMENT_CSS, handleAttachmentRoutes } from "./attachments";
 import { handleAuthRoutes } from "./auth";
 import { handleHealth } from "./health";
 import { css } from "./http";
@@ -18,12 +19,17 @@ export default {
     }
 
     if (request.method === "GET" && url.pathname === "/app.css") {
-      return css(APP_CSS);
+      return css(APP_CSS + ATTACHMENT_CSS);
     }
 
     const auth = await handleAuthRoutes(request, env);
     if (auth) {
       return auth;
+    }
+
+    const attachment = await handleAttachmentRoutes(request, env, url);
+    if (attachment) {
+      return attachment;
     }
 
     if (url.pathname.startsWith("/api/")) {
