@@ -3,11 +3,11 @@ import { afterEach, test } from "node:test";
 import { handleAdmin } from "../src/admin.ts";
 import { OWNER_SESSION_COOKIE, signOwnerSession } from "../src/auth.ts";
 import type { Env } from "../src/env.ts";
-import { handleScheduled } from "../src/index.ts";
 import {
   WEBHOOK_MAX_ATTEMPTS,
   WEBHOOK_RETRY_BASE_MS,
   drainDueWebhookDeliveries,
+  handleScheduled,
   notifyInbound,
   saveHookConfig,
   setWebhookFetchForTests,
@@ -448,7 +448,7 @@ test("each retry mints a fresh signature timestamp", async () => {
 
   const first = await notifyInbound(e, notifyInput("msg-fresh-ts"));
   assert.equal(first[0].status, "pending");
-  const later = (first[0].last_attempt_at ?? Date.now()) + 15_000;
+  const later = (first[0].next_attempt_at ?? Date.now()) + 1;
   const drained = await drainDueWebhookDeliveries(e, { now: later });
   assert.equal(drained.sent, 1);
   assert.equal(posts.length, 2);

@@ -12,21 +12,10 @@ import { handleInbound } from "./inbound";
 import { handleRestRoutes } from "./rest";
 import { APP_CSS } from "./styles";
 import { handleUi } from "./ui";
-import {
-  drainDueWebhookDeliveries,
-  type DrainWebhookOptions,
-  type WebhookDrainResult,
-} from "./webhooks.ts";
+import { drainDueWebhookDeliveries, handleScheduled } from "./webhooks.ts";
 
 export { requireAdmin, requireAdminOrOwner, requireOwner } from "./auth";
-
-/** Cron / test entry: drain due inbound webhook/forward deliveries. */
-export async function handleScheduled(
-  env: Env,
-  opts?: DrainWebhookOptions,
-): Promise<WebhookDrainResult> {
-  return drainDueWebhookDeliveries(env, opts);
-}
+export { handleScheduled };
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {

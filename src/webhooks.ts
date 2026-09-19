@@ -792,6 +792,14 @@ export async function notifyInbound(env: Env, input: InboundNotifyInput): Promis
  * Drain due `pending` rows. Caps batch size, per-mailbox fanout, and
  * concurrent POSTs so one bad hook cannot DoS the Worker.
  */
+/** Cron / admin / test entry for the pending delivery drain. */
+export async function handleScheduled(
+  env: Env,
+  opts: DrainWebhookOptions = {},
+): Promise<WebhookDrainResult> {
+  return drainDueWebhookDeliveries(env, opts);
+}
+
 export async function drainDueWebhookDeliveries(
   env: Env,
   opts: DrainWebhookOptions = {},
