@@ -269,6 +269,20 @@ curl -sS -b /tmp/pg-cookies http://127.0.0.1:8787/api/outbound/attempts
 
 Open [http://127.0.0.1:8787/compose](http://127.0.0.1:8787/compose) while signed in to use the form. Recent attempts (including failures) stay on that page.
 
+### Outbound URL safety
+
+`src/safe-url.ts` is a default-deny helper for operator-supplied outbound URLs (inbound webhooks / forward, #11). Policy matches [open-site-health `internal/safeurl`](https://github.com/bugman666/open-site-health/tree/main/internal/safeurl): `http` / `https` only; block `localhost`, `*.localhost`, `localhost.localdomain`, and cloud metadata hostnames; block loopback, RFC1918, unspecified, link-local, multicast, CGNAT `100.64.0.0/10`, and `169.254.169.254`. Literal IPs in the hostname use the same ranges. Public `http` hosts are allowed; private hosts are the gate, not the scheme.
+
+Call `validateSafeUrl` at **save time** and again at **fetch time**. This check is host / IP-literal only. DNS rebinding and redirect hops are the caller's job.
+
+Workers `fetch` cannot install a custom dialer (no restricted `DialContext`). Recommended:
+
+1. Validate before `fetch`
+2. If you follow redirects yourself, re-validate each `Location`
+3. If you use `redirect: "follow"`, the runtime may land on a private address after a public first hop — residual SSRF risk
+
+Operators who need local http hooks may set `ALLOW_PRIVATE_WEBHOOKS=1` and pass `allowPrivate: true`. The module honors that argument only; it does not read the environment or wire webhook routes.
+
 ### Auth (mailbox owner session + admin bearer)
 
 Design: **owner = signed HttpOnly session cookie** after `POST /auth/login`. **Admin = `Authorization: Bearer <ADMIN_TOKEN>`**. Inbox HTML and JSON call `requireOwner` from `src/auth.ts`.
@@ -501,6 +515,7 @@ Then, in the Cloudflare dashboard, enable Email Routing for your domain and add 
 | `src/threads.ts` | Inbox thread grouping (citation, then subject fallback) |
 | `src/triage.ts` | Search `LIKE` helpers + unread / star filters |
 | `src/outbound.ts` | Pluggable outbound adapters (`stub` / `resend` / `http`) |
+| `src/safe-url.ts` | SSRF guard for operator-supplied outbound URLs (webhooks / forward) |
 | `src/send.ts` | Validate + persist outbound attempts |
 | `migrations/0001_init.sql` | D1 `mailboxes` + `messages` |
 | `migrations/0002_message_body.sql` | `messages.body_text` |
