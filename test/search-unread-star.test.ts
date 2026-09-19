@@ -22,6 +22,8 @@ import {
   parseInboxFilter,
   parseSearchQuery,
   SEARCH_ENGINE,
+  SEARCH_ENGINE_FTS5,
+  SEARCH_ENGINE_LIKE,
 } from "../src/triage.ts";
 
 const SECRET = "change-me-local-session-secret";
@@ -240,7 +242,8 @@ function fromLikeContains(pattern: string): string {
 }
 
 test("search helpers: LIKE escape and from/subject/body/envelope-to match", () => {
-  assert.equal(SEARCH_ENGINE, "like");
+  assert.equal(SEARCH_ENGINE, SEARCH_ENGINE_FTS5);
+  assert.equal(SEARCH_ENGINE_LIKE, "like");
   assert.equal(parseInboxFilter("unread"), "unread");
   assert.equal(parseInboxFilter("starred"), "starred");
   assert.equal(parseInboxFilter("nope"), "all");

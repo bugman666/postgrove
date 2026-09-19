@@ -29,6 +29,7 @@ import {
   listFolderMessages,
   listInboxMessages,
   listMailboxesForUser,
+  searchInboxMessages,
   listOutboundAttempts,
   MailboxInputError,
   markRead,
@@ -49,7 +50,7 @@ import {
   threadHasUnread,
   type MessageThread,
 } from "./threads.ts";
-import { parseInboxFilter, parseSearchQuery, SEARCH_ENGINE } from "./triage.ts";
+import { parseInboxFilter, parseSearchQuery } from "./triage.ts";
 import {
   HookInputError,
   getHookConfig,
@@ -331,7 +332,7 @@ async function readThread(
 async function searchMessages(env: Env, mailbox: MailboxRecord, url: URL): Promise<Response> {
   const q = parseSearchQuery(url.searchParams.get("q"));
   const filter = parseInboxFilter(url.searchParams.get("filter"));
-  const messages = await listInboxMessages(env, mailbox.id, { q, filter });
+  const { messages, engine } = await searchInboxMessages(env, mailbox.id, { q, filter });
   const unreadCount = await countUnreadInbox(env, mailbox.id);
   return json({
     ok: true,
@@ -339,7 +340,7 @@ async function searchMessages(env: Env, mailbox: MailboxRecord, url: URL): Promi
     folder: "inbox",
     q,
     filter,
-    engine: SEARCH_ENGINE,
+    engine,
     unread_count: unreadCount,
     messages: messages.map(publicMessageListItem),
   });
