@@ -8,8 +8,8 @@ import {
   type MailboxAliasRecord,
 } from "./aliases.ts";
 import { listApiTokens, type ApiTokenRecord } from "./api-tokens.ts";
-import { actorUserId, requireOwner, type MailboxActor } from "./auth.ts";
-import type { PageError } from "./error-banner.ts";
+import { actorUserId, cookieValue, OWNER_SESSION_COOKIE, requireOwner, type MailboxActor } from "./auth.ts";
+import { loginSessionErrorCode, type PageError } from "./error-banner.ts";
 import { parseDraftFields, parseFolder } from "./folders.ts";
 import { html, redirect } from "./http.ts";
 import { parseLocalePreference, withLocaleCookie } from "./i18n.ts";
@@ -88,7 +88,7 @@ export async function handleUi(
   const baseShell = await resolveShell(request, env);
   const gate = await requireOwner(request, env);
   if (!gate.ok) {
-    return unauthorizedPage(baseShell, gate.response);
+    return unauthorizedPage(baseShell, gate.response, url, request);
   }
 
   const owner: MailboxActor = gate.principal;
@@ -509,9 +509,14 @@ async function renderSettings(
   );
 }
 
-async function unauthorizedPage(shell: Shell, authResponse: Response): Promise<Response> {
+async function unauthorizedPage(
+  shell: Shell,
+  authResponse: Response,
+  url: URL,
+  request: Request,
+): Promise<Response> {
   let hint = "POST /auth/login with address and token, then send the session cookie.";
-  let error = "unauthorized";
+  let authError = "";
   try {
     const body = (await authResponse.clone().json()) as {
       hint?: string;
@@ -521,12 +526,18 @@ async function unauthorizedPage(shell: Shell, authResponse: Response): Promise<R
       hint = body.hint;
     }
     if (typeof body.error === "string" && body.error) {
-      error = body.error;
+      authError = body.error;
     }
   } catch {
     // Keep the auth-module default hint.
   }
-  return html(renderLoginPage(shell, error, hint), authResponse.status);
+  const error = loginSessionErrorCode({
+    queryError: url.searchParams.get("error"),
+    authError,
+    hasSessionCookie: Boolean(cookieValue(request.headers.get("cookie"), OWNER_SESSION_COOKIE)),
+    status: authResponse.status,
+  });
+  return html(renderLoginPage(shell, error, error ? hint : ""), authResponse.status);
 }
 
 function forbiddenOrMissing(shell: Shell, ownMailbox: MailboxRecord | null, unreadCount = 0): Response {
