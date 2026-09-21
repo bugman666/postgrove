@@ -1,13 +1,17 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { OWNER_SESSION_COOKIE } from "../src/auth.ts";
 import { EMPTY_INBOX_SRC } from "../src/brand-assets.ts";
-import { errorScene, humanErrorMessage, layeredBannerHtml } from "../src/error-banner.ts";
+import type { Env } from "../src/env.ts";
+import { errorScene, humanErrorMessage, layeredBannerHtml, loginSessionErrorCode } from "../src/error-banner.ts";
 import { t } from "../src/i18n.ts";
 import { emptyInboxCopy, inboxEmptyArt, renderInboxPage } from "../src/pages/inbox.ts";
 import { attemptBanner } from "../src/pages/compose.ts";
 import { renderAddressesPage, renderLoginPage } from "../src/pages/account.ts";
 import type { MailboxRecord, OutboundAttemptRecord } from "../src/store.ts";
+import { handleUi } from "../src/ui.ts";
 import { emptyNav, layout, type Shell } from "../src/view.ts";
+import { MemoryD1 } from "./helpers/memory-d1.ts";
 
 const MAILBOX: MailboxRecord = {
   id: "11111111-1111-4111-8111-111111111111",
@@ -25,6 +29,15 @@ function shell(overrides: Partial<Shell> = {}): Shell {
     brand: { site_title: "Postgrove", logo_url: null, accent: "#1B4332" },
     nav: emptyNav(),
     ...overrides,
+  };
+}
+
+function loginEnv(): Env {
+  return {
+    DB: new MemoryD1({}).asDatabase(),
+    SESSION_SECRET: "change-me-local-session-secret",
+    OWNER_TOKEN: "change-me-local-owner-token",
+    ADMIN_TOKEN: "change-me-local-admin-token",
   };
 }
 
@@ -100,6 +113,8 @@ test("empty inbox uses brand art with short alt; search has copy only", () => {
 
 test("layered banners keep codes under Details", () => {
   assert.equal(errorScene("unauthorized"), "session");
+  assert.equal(errorScene("session"), "session");
+  assert.equal(errorScene("session_expired"), "session");
   assert.equal(errorScene("outbound_not_configured"), "outbound_unset");
   assert.equal(errorScene("outbound_failed"), "send_failed");
   assert.equal(errorScene("quota_send"), "quota_full");
@@ -134,6 +149,114 @@ test("layered banners keep codes under Details", () => {
   assert.match(login, /登录已失效。重新登录后再继续。/);
   assert.match(login, /<code class="mono">unauthorized<\/code>/);
   assert.doesNotMatch(login.split("banner-details")[0] ?? login, />unauthorized</);
+});
+
+test("login page is clean without an error query; session error shows the banner", async () => {
+  assert.equal(
+    loginSessionErrorCode({
+      queryError: null,
+      authError: "unauthorized",
+      hasSessionCookie: false,
+      status: 401,
+    }),
+    "",
+  );
+  assert.equal(
+    loginSessionErrorCode({
+      queryError: "session",
+      authError: "unauthorized",
+      hasSessionCookie: false,
+      status: 401,
+    }),
+    "session",
+  );
+  assert.equal(
+    loginSessionErrorCode({
+      queryError: "",
+      authError: "unauthorized",
+      hasSessionCookie: true,
+      status: 401,
+    }),
+    "unauthorized",
+  );
+
+  const fresh = renderLoginPage(shell(), "", "");
+  assert.doesNotMatch(fresh, /登录已失效/);
+  assert.doesNotMatch(fresh, /Your session expired/);
+  assert.doesNotMatch(fresh, /banner-lead/);
+  assert.match(fresh, /<label>地址/);
+  assert.match(fresh, /<label>口令/);
+  assert.match(fresh, /本地开发：口令是 \.dev\.vars 里的 OWNER_TOKEN（示例 change-me-local-owner-token）。生产见 docs\/PRODUCTION_AUTH\.md。/);
+  assert.match(fresh, /登录失败。重新登录后再继续。/);
+  assert.match(fresh, /登录失败。检查网络后重试。/);
+
+  const enFresh = renderLoginPage(shell({ locale: "en", preference: "en" }), "", "");
+  assert.doesNotMatch(enFresh, /登录已失效/);
+  assert.doesNotMatch(enFresh, /Your session expired/);
+  assert.match(enFresh, /<label>Address/);
+  assert.match(enFresh, /<label>Passphrase/);
+  assert.match(
+    enFresh,
+    /Local development: the passphrase is OWNER_TOKEN in \.dev\.vars \(example change-me-local-owner-token\)\. For production, see docs\/PRODUCTION_AUTH\.md\./,
+  );
+  assert.match(enFresh, /Sign-in failed\. Sign in again to continue\./);
+  assert.match(enFresh, /Sign-in failed\. Check the network and retry\./);
+
+  const sessionQuery = renderLoginPage(shell(), "session", "Session expired or invalid.");
+  assert.match(sessionQuery, /登录已失效。重新登录后再继续。/);
+  assert.match(sessionQuery, /<code class="mono">session<\/code>/);
+
+  assert.equal(t("zh", "login.address"), "地址");
+  assert.equal(t("zh", "login.passphrase"), "口令");
+  assert.equal(t("en", "login.address"), "Address");
+  assert.equal(t("en", "login.passphrase"), "Passphrase");
+  assert.equal(
+    t("zh", "login.hint"),
+    "本地开发：口令是 .dev.vars 里的 OWNER_TOKEN（示例 change-me-local-owner-token）。生产见 docs/PRODUCTION_AUTH.md。",
+  );
+  assert.equal(
+    t("en", "login.hint"),
+    "Local development: the passphrase is OWNER_TOKEN in .dev.vars (example change-me-local-owner-token). For production, see docs/PRODUCTION_AUTH.md.",
+  );
+  assert.equal(t("zh", "login.fail"), "登录失败。重新登录后再继续。");
+  assert.equal(t("zh", "login.network"), "登录失败。检查网络后重试。");
+  assert.equal(t("en", "login.fail"), "Sign-in failed. Sign in again to continue.");
+  assert.equal(t("en", "login.network"), "Sign-in failed. Check the network and retry.");
+
+  const env = loginEnv();
+  const cleanRes = await handleUi(
+    new Request("http://127.0.0.1:8787/"),
+    env,
+    new URL("http://127.0.0.1:8787/"),
+  );
+  assert.equal(cleanRes.status, 401);
+  const cleanHtml = await cleanRes.text();
+  assert.doesNotMatch(cleanHtml, /登录已失效/);
+  assert.match(cleanHtml, /login-form/);
+  assert.match(cleanHtml, /本地开发：口令是 \.dev\.vars 里的 OWNER_TOKEN（示例 change-me-local-owner-token）/);
+  assert.match(cleanHtml, /docs\/PRODUCTION_AUTH\.md/);
+
+  const sessionRes = await handleUi(
+    new Request("http://127.0.0.1:8787/?error=session"),
+    env,
+    new URL("http://127.0.0.1:8787/?error=session"),
+  );
+  assert.equal(sessionRes.status, 401);
+  const sessionHtml = await sessionRes.text();
+  assert.match(sessionHtml, /登录已失效。重新登录后再继续。/);
+  assert.match(sessionHtml, /<code class="mono">session<\/code>/);
+
+  const expiredRes = await handleUi(
+    new Request("http://127.0.0.1:8787/", {
+      headers: { cookie: `${OWNER_SESSION_COOKIE}=not-a-valid-session` },
+    }),
+    env,
+    new URL("http://127.0.0.1:8787/"),
+  );
+  assert.equal(expiredRes.status, 401);
+  const expiredHtml = await expiredRes.text();
+  assert.match(expiredHtml, /登录已失效。重新登录后再继续。/);
+  assert.match(expiredHtml, /<code class="mono">unauthorized<\/code>/);
 });
 
 test("personal nav: four primary tabs; watch desk only for admin", () => {

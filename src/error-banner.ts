@@ -24,6 +24,7 @@ export function errorScene(code: string | null | undefined): ErrorScene | null {
   switch ((code ?? "").trim()) {
     case "unauthorized":
     case "session_expired":
+    case "session":
       return "session";
     case "outbound_not_configured":
     case "unknown_provider":
@@ -42,6 +43,27 @@ export function errorScene(code: string | null | undefined): ErrorScene | null {
     default:
       return null;
   }
+}
+
+/**
+ * Login HTML only: session-expired copy is a display condition.
+ * Fresh visits (no cookie, no `?error=`) stay clean. Query codes that map
+ * to the session scene, or a 401 with a session cookie still present, show it.
+ */
+export function loginSessionErrorCode(opts: {
+  queryError?: string | null;
+  authError?: string | null;
+  hasSessionCookie: boolean;
+  status: number;
+}): string {
+  const query = (opts.queryError ?? "").trim();
+  if (errorScene(query) === "session") {
+    return query;
+  }
+  if (opts.hasSessionCookie && opts.status === 401 && errorScene(opts.authError) === "session") {
+    return (opts.authError ?? "").trim();
+  }
+  return "";
 }
 
 export function humanErrorMessage(
