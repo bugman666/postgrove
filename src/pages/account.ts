@@ -2,7 +2,7 @@ import type { MailboxAliasRecord } from "../aliases.ts";
 import { renderAliasPanelHtml } from "../aliases.ts";
 import type { ApiTokenRecord } from "../api-tokens.ts";
 import type { MailboxActor } from "../auth.ts";
-import { errorScene, layeredBannerHtml, pageErrorBanner, type PageError } from "../error-banner.ts";
+import { layeredBannerHtml, pageErrorBanner, type PageError } from "../error-banner.ts";
 import { EMPTY_ART, escapeHtml, formatReceived } from "../html.ts";
 import type { MailboxRecord } from "../store.ts";
 import { boxPath, inboxHref } from "../ui-paths.ts";
@@ -224,15 +224,16 @@ export function renderSettingsPage(
 }
 
 export function renderLoginPage(shell: Shell, error: string, hint: string): string {
-  const sessionBanner =
-    errorScene(error) === "session"
-      ? layeredBannerHtml({
-          locale: shell.locale,
-          message: tr(shell, "error.session"),
-          code: error,
-          detail: hint,
-        })
-      : "";
+  const sessionBanner = error.trim()
+    ? layeredBannerHtml({
+        locale: shell.locale,
+        message: tr(shell, "error.session"),
+        code: error,
+        detail: hint,
+      })
+    : "";
+  const failCopy = JSON.stringify(tr(shell, "login.fail"));
+  const networkCopy = JSON.stringify(tr(shell, "login.network"));
   return `<!DOCTYPE html>
 <html lang="${documentLang(shell)}">
 <head>
@@ -249,13 +250,13 @@ export function renderLoginPage(shell: Shell, error: string, hint: string): stri
       <div class="page-card">
         ${sessionBanner}
         <form id="login-form" class="login-form">
-          <label>地址
+          <label>${escapeHtml(tr(shell, "login.address"))}
             <input name="address" class="search" type="email" autocomplete="username" value="inbox@example.test" required>
           </label>
-          <label>口令
+          <label>${escapeHtml(tr(shell, "login.passphrase"))}
             <input name="token" class="search" type="password" autocomplete="current-password" required>
           </label>
-          <p class="banner">${escapeHtml(tr(shell, "login.hint-local"))}</p>
+          <p class="banner">${escapeHtml(tr(shell, "login.hint"))}</p>
           <button class="btn btn-primary" type="submit">${escapeHtml(tr(shell, "brand.login"))}</button>
           <p id="login-error" class="banner" hidden></p>
         </form>
@@ -284,11 +285,11 @@ export function renderLoginPage(shell: Shell, error: string, hint: string): stri
               location.href = "/";
               return;
             }
-            err.textContent = result.body.hint || "登录失败。重新登录后再继续。";
+            err.textContent = result.body.hint || ${failCopy};
             err.hidden = false;
           })
           .catch(function () {
-            err.textContent = "登录失败。检查网络后重试。";
+            err.textContent = ${networkCopy};
             err.hidden = false;
           });
       });

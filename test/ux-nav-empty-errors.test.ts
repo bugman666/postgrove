@@ -184,25 +184,44 @@ test("login page is clean without an error query; session error shows the banner
   assert.doesNotMatch(fresh, /登录已失效/);
   assert.doesNotMatch(fresh, /Your session expired/);
   assert.doesNotMatch(fresh, /banner-lead/);
-  assert.match(fresh, /本地默认口令见 \.dev\.vars 的 OWNER_TOKEN（示例 change-me-local-owner-token）。勿在生产复用。/);
+  assert.match(fresh, /<label>地址/);
+  assert.match(fresh, /<label>口令/);
+  assert.match(fresh, /本地默认 OWNER_TOKEN=change-me-local-owner-token（\.dev\.vars）。勿在生产复用，见 docs\/PRODUCTION_AUTH\.md。/);
+  assert.match(fresh, /登录失败。重新登录后再继续。/);
+  assert.match(fresh, /登录失败。检查网络后重试。/);
 
   const enFresh = renderLoginPage(shell({ locale: "en", preference: "en" }), "", "");
   assert.doesNotMatch(enFresh, /登录已失效/);
   assert.doesNotMatch(enFresh, /Your session expired/);
+  assert.match(enFresh, /<label>Address/);
+  assert.match(enFresh, /<label>Passphrase/);
   assert.match(
     enFresh,
-    /Local default is OWNER_TOKEN in \.dev\.vars \(example change-me-local-owner-token\)\. Do not reuse in production\./,
+    /Local default OWNER_TOKEN=change-me-local-owner-token in \.dev\.vars\. Do not reuse in production; see docs\/PRODUCTION_AUTH\.md\./,
   );
+  assert.match(enFresh, /Sign-in failed\. Sign in again to continue\./);
+  assert.match(enFresh, /Sign-in failed\. Check the network and retry\./);
 
   const sessionQuery = renderLoginPage(shell(), "session", "Session expired or invalid.");
   assert.match(sessionQuery, /登录已失效。重新登录后再继续。/);
   assert.match(sessionQuery, /<code class="mono">session<\/code>/);
 
-  assert.equal(t("zh", "login.hint-local"), "本地默认口令见 .dev.vars 的 OWNER_TOKEN（示例 change-me-local-owner-token）。勿在生产复用。");
+  assert.equal(t("zh", "login.address"), "地址");
+  assert.equal(t("zh", "login.passphrase"), "口令");
+  assert.equal(t("en", "login.address"), "Address");
+  assert.equal(t("en", "login.passphrase"), "Passphrase");
   assert.equal(
-    t("en", "login.hint-local"),
-    "Local default is OWNER_TOKEN in .dev.vars (example change-me-local-owner-token). Do not reuse in production.",
+    t("zh", "login.hint"),
+    "本地默认 OWNER_TOKEN=change-me-local-owner-token（.dev.vars）。勿在生产复用，见 docs/PRODUCTION_AUTH.md。",
   );
+  assert.equal(
+    t("en", "login.hint"),
+    "Local default OWNER_TOKEN=change-me-local-owner-token in .dev.vars. Do not reuse in production; see docs/PRODUCTION_AUTH.md.",
+  );
+  assert.equal(t("zh", "login.fail"), "登录失败。重新登录后再继续。");
+  assert.equal(t("zh", "login.network"), "登录失败。检查网络后重试。");
+  assert.equal(t("en", "login.fail"), "Sign-in failed. Sign in again to continue.");
+  assert.equal(t("en", "login.network"), "Sign-in failed. Check the network and retry.");
 
   const env = loginEnv();
   const cleanRes = await handleUi(
@@ -214,7 +233,8 @@ test("login page is clean without an error query; session error shows the banner
   const cleanHtml = await cleanRes.text();
   assert.doesNotMatch(cleanHtml, /登录已失效/);
   assert.match(cleanHtml, /login-form/);
-  assert.match(cleanHtml, /OWNER_TOKEN/);
+  assert.match(cleanHtml, /OWNER_TOKEN=change-me-local-owner-token/);
+  assert.match(cleanHtml, /docs\/PRODUCTION_AUTH\.md/);
 
   const sessionRes = await handleUi(
     new Request("http://127.0.0.1:8787/?error=session"),
