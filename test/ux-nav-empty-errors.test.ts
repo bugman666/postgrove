@@ -186,7 +186,7 @@ test("login page is clean without an error query; session error shows the banner
   assert.doesNotMatch(fresh, /banner-lead/);
   assert.match(fresh, /<label>地址/);
   assert.match(fresh, /<label>口令/);
-  assert.match(fresh, /本地默认 OWNER_TOKEN=change-me-local-owner-token（\.dev\.vars）。勿在生产复用，见 docs\/PRODUCTION_AUTH\.md。/);
+  assert.match(fresh, /本地开发：口令是 \.dev\.vars 里的 OWNER_TOKEN（示例 change-me-local-owner-token）。生产见 docs\/PRODUCTION_AUTH\.md。/);
   assert.match(fresh, /登录失败。重新登录后再继续。/);
   assert.match(fresh, /登录失败。检查网络后重试。/);
 
@@ -197,7 +197,7 @@ test("login page is clean without an error query; session error shows the banner
   assert.match(enFresh, /<label>Passphrase/);
   assert.match(
     enFresh,
-    /Local default OWNER_TOKEN=change-me-local-owner-token in \.dev\.vars\. Do not reuse in production; see docs\/PRODUCTION_AUTH\.md\./,
+    /Local development: the passphrase is OWNER_TOKEN in \.dev\.vars \(example change-me-local-owner-token\)\. For production, see docs\/PRODUCTION_AUTH\.md\./,
   );
   assert.match(enFresh, /Sign-in failed\. Sign in again to continue\./);
   assert.match(enFresh, /Sign-in failed\. Check the network and retry\./);
@@ -212,11 +212,11 @@ test("login page is clean without an error query; session error shows the banner
   assert.equal(t("en", "login.passphrase"), "Passphrase");
   assert.equal(
     t("zh", "login.hint"),
-    "本地默认 OWNER_TOKEN=change-me-local-owner-token（.dev.vars）。勿在生产复用，见 docs/PRODUCTION_AUTH.md。",
+    "本地开发：口令是 .dev.vars 里的 OWNER_TOKEN（示例 change-me-local-owner-token）。生产见 docs/PRODUCTION_AUTH.md。",
   );
   assert.equal(
     t("en", "login.hint"),
-    "Local default OWNER_TOKEN=change-me-local-owner-token in .dev.vars. Do not reuse in production; see docs/PRODUCTION_AUTH.md.",
+    "Local development: the passphrase is OWNER_TOKEN in .dev.vars (example change-me-local-owner-token). For production, see docs/PRODUCTION_AUTH.md.",
   );
   assert.equal(t("zh", "login.fail"), "登录失败。重新登录后再继续。");
   assert.equal(t("zh", "login.network"), "登录失败。检查网络后重试。");
@@ -233,7 +233,7 @@ test("login page is clean without an error query; session error shows the banner
   const cleanHtml = await cleanRes.text();
   assert.doesNotMatch(cleanHtml, /登录已失效/);
   assert.match(cleanHtml, /login-form/);
-  assert.match(cleanHtml, /OWNER_TOKEN=change-me-local-owner-token/);
+  assert.match(cleanHtml, /本地开发：口令是 \.dev\.vars 里的 OWNER_TOKEN（示例 change-me-local-owner-token）/);
   assert.match(cleanHtml, /docs\/PRODUCTION_AUTH\.md/);
 
   const sessionRes = await handleUi(
