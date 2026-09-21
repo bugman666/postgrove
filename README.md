@@ -8,6 +8,18 @@ Open addresses on a domain you own, receive mail at the edge, read it in a web i
 
 > Not affiliated with other Cloudflare mail demos. Educational / self-host use. You are responsible for domain, deliverability, and abuse controls.
 
+## Quick start (local, ~5 minutes)
+
+Needs Node.js 22+. No Cloudflare account for this path.
+
+1. `npm install`
+2. `cp .dev.vars.example .dev.vars`
+3. `npm run db:migrate:local && npm run seed:local`
+4. `npm run dev` → open http://127.0.0.1:8787/login
+5. Sign in with address `inbox@example.test` and passphrase `change-me-local-owner-token` (from `.dev.vars` → `OWNER_TOKEN`)
+
+You should land in a seeded inbox. Full checklist: [Deploy](docs/DEPLOY.md) · [Production auth](docs/PRODUCTION_AUTH.md) · [v0.2 notes](docs/RELEASE_NOTES_v0.2.md).
+
 ## Why Postgrove
 
 - **Your domain** — one Worker, several role addresses (`support@`, `billing@`)
@@ -59,9 +71,7 @@ See Issues under milestones `P0-MVP` … `P3-dev-api`. Longer write-ups: [produc
 
 ## Status
 
-Current cut: [RELEASE_NOTES_v0.2](docs/RELEASE_NOTES_v0.2.md) (v0.2 polish close-out). First-cut notes: [RELEASE_NOTES_v0.1](docs/RELEASE_NOTES_v0.1.md).
-
-P0 inbox on the Worker: list / read / delete against D1, inbound attachments in R2, plus compose/send behind the owner session. Search (D1 FTS5 on from / To / subject / body, LIKE fallback), unread toggle with a nav count, and star/flag are in. System folders (inbox / sent / drafts / trash / spam) use the existing `messages.folder` column; drafts save and resume on `/compose`. Outbound is pluggable (`stub` / `resend` / `http`). Reply / reply-all / forward prefill compose and send through the same adapters (In-Reply-To / References on reply). The inbox list groups related mail into basic threads (count on the row; open expands in time order). Mailbox-scoped REST tokens live under `/api/v1` (hash at rest, `Authorization: Bearer pg_…`). Tokens are **mailbox** or **admin** kind; mailbox keys stay on one address, admin keys (or `ADMIN_TOKEN`) may act across mailboxes. Optional per-token daily request / send quotas fail loud (`quota_api` / `quota_send`). Plus-tag subaddressing (`user+tag@your-domain`) lands in the primary mailbox; Settings can generate/list aliases on that domain only. Developer ephemeral inboxes (`/api/v1/dev/inboxes`) mint a short-lived address on **this deployment's own domain**, then wait / extract OTP or link / close. Public signup is **off** unless Turnstile is configured. Small-team members (`users` + `user_mailboxes`) have address / storage / daily-send quotas; `/admin` is a forest-token 值守台 (ADMIN_TOKEN or admin role) with a light overview (users / today's mail / attachment MB) and site title / logo / accent (`--pg-color-brand` only). The UI follows `Accept-Language` (en / zh) and can be forced from Settings. Inbound webhooks POST a signed JSON payload; optional forward goes to a chat-bot URL or an external mailbox. Failed deliveries stay on `/settings` and `/admin` as `pending` then retry via cron (never swallowed). Outbound send attachments are a later follow-up. Light-editorial brand art (paper + forest green) lives in [`docs/assets/`](docs/assets/).
+Current cut: [v0.2](docs/RELEASE_NOTES_v0.2.md) (polish close-out). First-cut notes: [v0.1](docs/RELEASE_NOTES_v0.1.md). Feature list and known gaps live there so this README stays a runbook.
 
 ## Local development
 
@@ -76,7 +86,9 @@ npm run seed:local               # sample mailboxes + messages + one R2 attachme
 npm run dev
 ```
 
-`wrangler dev` serves the Worker at `http://127.0.0.1:8787` by default. For a remote Worker, see [Deploy](#deploy).
+`wrangler dev` serves the Worker at `http://127.0.0.1:8787` by default. Sign-in steps are in [Quick start](#quick-start-local-5-minutes). For a remote Worker, see [Deploy](#deploy).
+
+After migrate + seed + `npm run dev`, the #44 gate is `npm run smoke:local` (`scripts/smoke-local.sh`): S1 login, S2 inbox read/delete, S3 compose → Sent, S4 reply/forward prefill + stub send, S5 attachment download + 401, S8 create → wait(408) → extract OTP → close twice. No Cloudflare account. The script mutates seed rows; reset `.wrangler/state` and re-seed if a seed id 404s. CI does **not** start Wrangler (too heavy for Actions); it still applies `0001`–latest to an empty local D1.
 
 ### Unit tests (MemoryD1)
 
@@ -93,8 +105,6 @@ const env = { DB: db.asDatabase(), SESSION_SECRET, OWNER_TOKEN, ADMIN_TOKEN };
 ```
 
 `MemoryR2` is in the same module for inbound persist / download tests. If a new SQL path misses, extend the helper — do not add another in-file MemoryD1. MIME malice samples live under `test/fixtures/mime/` (nested multipart, odd boundary, lying Content-Type, path-traversal names, missing boundary, oversized part).
-
-After migrate + seed + `npm run dev`, the #44 gate is `npm run smoke:local` (`scripts/smoke-local.sh`): S1 login, S2 inbox read/delete, S3 compose → Sent, S4 reply/forward prefill + stub send, S5 attachment download + 401, S8 create → wait(408) → extract OTP → close twice. No Cloudflare account. The script mutates seed rows; reset `.wrangler/state` and re-seed if a seed id 404s. CI does **not** start Wrangler (too heavy for Actions); it still applies `0001`–latest to an empty local D1.
 
 ### Inbox (local)
 
