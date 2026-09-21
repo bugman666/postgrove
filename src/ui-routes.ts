@@ -20,6 +20,7 @@ import {
   type ComposePrefill,
 } from "./reply.ts";
 import { parseSendFields, sendOutbound } from "./send.ts";
+import { resolveLoginLanding } from "./login-redirect.ts";
 import {
   countUnreadInbox,
   createMailbox,
@@ -102,10 +103,18 @@ export async function handleUi(
     if (method !== "GET") {
       return pageMethodNotAllowed(shell);
     }
-    if (!ownMailbox) {
+    const boxes = await visibleUiMailboxes(env, owner, ownMailbox);
+    if (boxes.length === 0) {
       return html(renderAddressesPage(shell, [], "inbox", unreadCount), 200);
     }
-    return redirect(boxPath(ownMailbox.id));
+    const bound = ownMailbox ?? { id: owner.mailboxId, address: owner.address };
+    const landing = await resolveLoginLanding(env, {
+      kind: owner.kind,
+      bound,
+      userId: owner.kind === "mailbox" ? owner.userId : undefined,
+      mailboxes: boxes,
+    });
+    return redirect(landing.redirect);
   }
 
   if (path === "/compose") {

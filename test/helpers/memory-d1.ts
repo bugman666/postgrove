@@ -350,17 +350,27 @@ export class MemoryStatement {
       }
       if (sql.includes("select count(*)")) {
         rows = rows.filter((row) => {
-          const at = Number(row.received_at);
           const folder = String(row.folder ?? "");
+          if (sql.includes("mailbox_id =") && row.mailbox_id !== a) {
+            return false;
+          }
+          if (sql.includes("folder = 'inbox'") && folder !== "inbox") {
+            return false;
+          }
+          if (sql.includes("is_read = 0") && Number(row.is_read ?? 0) !== 0) {
+            return false;
+          }
           if (sql.includes("folder in") && folder !== "inbox" && folder !== "sent") {
             return false;
           }
+          const at = Number(row.received_at);
           if (typeof a === "number" && typeof b === "number") {
             return at >= a && at < b;
           }
           return true;
         });
-        return [{ n: rows.length }];
+        const n = rows.length;
+        return [{ n, message_count: n, unread_count: n }];
       }
       if (sql.includes("where id =") && sql.includes("mailbox_id =") && sql.includes("folder = 'inbox'")) {
         rows = rows.filter((row) => row.id === a && row.mailbox_id === b && row.folder === "inbox");

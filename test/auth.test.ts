@@ -176,9 +176,11 @@ test("login issues a session cookie for an active mailbox", async () => {
   const cookie = response.headers.get("set-cookie") ?? "";
   assert.match(cookie, new RegExp(`${OWNER_SESSION_COOKIE}=`));
   assert.match(cookie, /HttpOnly/i);
-  const body = (await response.json()) as { role: string; mailbox: { address: string } };
+  const body = (await response.json()) as { role: string; mailbox: { address: string }; redirect: string };
   assert.equal(body.role, "owner");
   assert.equal(body.mailbox.address, MAILBOX.address);
+  assert.equal(body.redirect, `/box/${MAILBOX.id}`);
+  assert.equal(response.headers.get("location"), `/box/${MAILBOX.id}`);
 
   const token = cookieValue(cookie);
   const session = await handleAuthRoutes(
