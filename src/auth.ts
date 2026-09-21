@@ -1,5 +1,6 @@
 import { findApiTokenByHash, hashApiToken, looksLikeApiToken } from "./api-tokens.ts";
 import type { Env } from "./env";
+import { resolveLoginLanding } from "./login-redirect.ts";
 import {
   clientKey,
   consumeRateLimit,
@@ -508,15 +509,17 @@ async function handleLogin(request: Request, env: Env): Promise<Response> {
   const tokenOk = timingSafeEqualString(tokenRaw, owner.token);
 
   if (tokenOk && mailbox) {
+    const landing = await resolveLoginLanding(env, { kind: "owner", bound: mailbox });
     const cookie = await signOwnerSession(secret.secret, {
-      mailboxId: mailbox.id,
-      address: mailbox.address,
+      mailboxId: landing.mailbox.id,
+      address: landing.mailbox.address,
     });
     return json(
       {
         ok: true,
         role: "owner",
-        mailbox: { id: mailbox.id, address: mailbox.address },
+        mailbox: { id: landing.mailbox.id, address: landing.mailbox.address },
+        redirect: landing.redirect,
       },
       200,
       {
@@ -526,6 +529,7 @@ async function handleLogin(request: Request, env: Env): Promise<Response> {
           request,
           SESSION_MAX_AGE_SECONDS,
         ),
+        location: landing.redirect,
       },
     );
   }
@@ -535,6 +539,11 @@ async function handleLogin(request: Request, env: Env): Promise<Response> {
       const user = await findUserByMailboxToken(env, mailbox.id, tokenRaw);
       if (user) {
         const mailboxIds = await listUserMailboxIds(env, user.id);
+        const landing = await resolveLoginLanding(env, {
+          kind: "mailbox",
+          bound: mailbox,
+          userId: user.id,
+        });
         const cookie = await signUserSession(secret.secret, {
           mailboxId: mailbox.id,
           address: mailbox.address,
@@ -548,6 +557,7 @@ async function handleLogin(request: Request, env: Env): Promise<Response> {
             user: { id: user.id, login: user.login, role: user.role },
             mailbox: { id: mailbox.id, address: mailbox.address },
             mailboxes: mailboxIds,
+            redirect: landing.redirect,
           },
           200,
           {
@@ -557,6 +567,7 @@ async function handleLogin(request: Request, env: Env): Promise<Response> {
               request,
               SESSION_MAX_AGE_SECONDS,
             ),
+            location: landing.redirect,
           },
         );
       }

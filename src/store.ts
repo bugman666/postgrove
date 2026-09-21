@@ -633,6 +633,16 @@ export async function countUnreadInbox(env: Env, mailboxId: string): Promise<num
   return Number(row?.unread_count ?? 0);
 }
 
+/** Inbox-folder messages only — used to land login on a mailbox that already has mail. */
+export async function countInboxMessages(env: Env, mailboxId: string): Promise<number> {
+  const row = await env.DB.prepare(
+    `SELECT COUNT(*) AS n FROM messages WHERE mailbox_id = ?1 AND folder = 'inbox'`,
+  )
+    .bind(mailboxId)
+    .first<{ n: number }>();
+  return Number(row?.n ?? 0);
+}
+
 export async function listFolderMessages(
   env: Env,
   mailboxId: string,

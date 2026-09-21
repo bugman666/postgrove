@@ -268,6 +268,16 @@ export function renderLoginPage(shell: Shell, error: string, hint: string): stri
       var form = document.getElementById("login-form");
       var err = document.getElementById("login-error");
       if (!form || !err) return;
+      function loginRedirectTarget(body, res) {
+        var next = body && typeof body.redirect === "string" ? body.redirect : "";
+        if (!next) {
+          next = res.headers.get("Location") || res.headers.get("location") || "";
+        }
+        if (next.charAt(0) === "/" && next.indexOf("//") !== 0 && next.indexOf("://") === -1) {
+          return next;
+        }
+        return "/";
+      }
       form.addEventListener("submit", function (event) {
         event.preventDefault();
         var data = new FormData(form);
@@ -282,7 +292,7 @@ export function renderLoginPage(shell: Shell, error: string, hint: string): stri
         }).then(function (res) { return res.json().then(function (body) { return { res: res, body: body }; }); })
           .then(function (result) {
             if (result.res.ok) {
-              location.href = "/";
+              location.href = loginRedirectTarget(result.body, result.res);
               return;
             }
             err.textContent = result.body.hint || ${failCopy};
